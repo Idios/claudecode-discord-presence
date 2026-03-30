@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claudecode-discord-presence"
+version = "0.1.0"
+description = "Show Claude Code session activity as Discord Rich Presence"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "pypresence>=4.0",
+]
+
+[project.scripts]
+claudecode-discord-presence = "claudecode_discord_presence.main:main"
+claudecode-discord-presence-hook = "claudecode_discord_presence.hook:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
