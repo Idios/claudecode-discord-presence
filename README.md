@@ -47,8 +47,12 @@ If you are reading this in a Claude Code session, follow these steps to set up t
      "hooks": {
        "SessionStart": [
          {
-           "type": "command",
-           "command": "python -m claudecode_discord_presence.hook"
+           "hooks": [
+             {
+               "type": "command",
+               "command": "python -m claudecode_discord_presence.hook"
+             }
+           ]
          }
        ]
      }
