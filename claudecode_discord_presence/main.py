@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from pypresence import Presence, exceptions as rpc_exceptions
+from pypresence.types import ActivityType
 
 CLIENT_ID = "1488214388920815667"
 POLL_INTERVAL_SEC = 60
@@ -173,7 +174,7 @@ def main() -> None:
                 rpc = connect_rpc(CLIENT_ID)
             if rpc is not None:
                 try:
-                    rpc.update()
+                    rpc.update(activity_type=ActivityType.WATCHING)
                     presence_active = True
                     print("Session active - presence shown.")
                 except Exception:
@@ -191,7 +192,7 @@ def main() -> None:
         elif active and presence_active:
             if rpc is not None:
                 try:
-                    rpc.update()
+                    rpc.update(activity_type=ActivityType.WATCHING)
                 except Exception:
                     rpc = None
                     presence_active = False
