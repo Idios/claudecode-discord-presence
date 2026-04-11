@@ -13,7 +13,6 @@ from pypresence import Presence, exceptions as rpc_exceptions
 CLIENT_ID = "1488214388920815667"
 POLL_INTERVAL_SEC = 60
 IDLE_TIMEOUT_SEC = 600  # 10 minutes
-KEEPALIVE_INTERVAL_SEC = 300  # 5 minutes — avoid frequent updates that push other activities off
 SUBPROCESS_TIMEOUT_SEC = 10
 CLAUDE_PROCESS_NAME = "claude.exe" if sys.platform == "win32" else "claude"
 
@@ -133,7 +132,6 @@ def main() -> None:
     write_pid_file()
     projects_dir = get_claude_projects_dir()
     presence_active = False
-    last_update_time: float = 0
     rpc: Presence | None = None
 
     def shutdown(signum: int, frame: object) -> None:
@@ -177,7 +175,6 @@ def main() -> None:
                 try:
                     rpc.update()
                     presence_active = True
-                    last_update_time = time.time()
                     print("Session active - presence shown.")
                 except Exception:
                     rpc = None
@@ -192,13 +189,9 @@ def main() -> None:
             presence_active = False
 
         elif active and presence_active:
-            # Only send keepalive updates at longer intervals to avoid
-            # pushing other games' activities off the Discord profile.
-            # See: https://github.com/Idios/claudecode-discord-presence/issues/1
-            if rpc is not None and (time.time() - last_update_time) >= KEEPALIVE_INTERVAL_SEC:
+            if rpc is not None:
                 try:
                     rpc.update()
-                    last_update_time = time.time()
                 except Exception:
                     rpc = None
                     presence_active = False
