@@ -17,6 +17,7 @@ from claudecode_discord_presence.main import (
     is_session_active,
     remove_pid_file,
     write_pid_file,
+    KEEPALIVE_INTERVAL_SEC,
     PID_FILE,
 )
 
@@ -353,55 +354,68 @@ class TestMainLoopRpcErrors:
     of loop iterations.
     """
 
-    def _run_one_iteration(self, rpc_mock, active: bool, presence_active: bool):
+    def _run_one_iteration(
+        self, rpc_mock, active: bool, presence_active: bool,
+        last_update_time: float = 0,
+    ):
         """Simulate one iteration of the main loop's RPC logic."""
-        from claudecode_discord_presence.main import connect_rpc, CLIENT_ID
-
         if active and not presence_active:
             rpc = rpc_mock
             if rpc is not None:
                 try:
                     rpc.update()
-                    return rpc, True
+                    return rpc, True, time.time()
                 except Exception:
-                    return None, False
-            return None, False
+                    return None, False, last_update_time
+            return None, False, last_update_time
         elif not active and presence_active:
             if rpc_mock is not None:
                 try:
                     rpc_mock.clear()
                 except Exception:
                     pass
-            return rpc_mock, False
+            return rpc_mock, False, last_update_time
         elif active and presence_active:
-            if rpc_mock is not None:
+            if rpc_mock is not None and (time.time() - last_update_time) >= KEEPALIVE_INTERVAL_SEC:
                 try:
                     rpc_mock.update()
-                    return rpc_mock, True
+                    return rpc_mock, True, time.time()
                 except Exception:
-                    return None, False
-            return None, False
-        return rpc_mock, presence_active
+                    return None, False, last_update_time
+            return rpc_mock, presence_active, last_update_time
+        return rpc_mock, presence_active, last_update_time
 
     def test_update_raises_clears_presence(self):
-        """If rpc.update() raises, presence should be deactivated."""
+        """If rpc.update() raises during keepalive, presence should be deactivated."""
         mock_rpc = MagicMock()
         mock_rpc.update.side_effect = BrokenPipeError("pipe broken")
-        rpc, active = self._run_one_iteration(mock_rpc, active=True, presence_active=True)
+        # last_update_time=0 ensures keepalive threshold is exceeded
+        rpc, active, _ = self._run_one_iteration(
+            mock_rpc, active=True, presence_active=True, last_update_time=0,
+        )
         assert rpc is None
         assert active is False
+
+    def test_no_update_within_keepalive_interval(self):
+        """rpc.update() should NOT be called if within keepalive interval."""
+        mock_rpc = MagicMock()
+        rpc, active, _ = self._run_one_iteration(
+            mock_rpc, active=True, presence_active=True, last_update_time=time.time(),
+        )
+        mock_rpc.update.assert_not_called()
+        assert active is True
 
     def test_clear_raises_still_deactivates(self):
         """If rpc.clear() raises, presence should still be deactivated."""
         mock_rpc = MagicMock()
         mock_rpc.clear.side_effect = OSError("IPC error")
-        rpc, active = self._run_one_iteration(mock_rpc, active=False, presence_active=True)
+        rpc, active, _ = self._run_one_iteration(mock_rpc, active=False, presence_active=True)
         assert active is False
 
     def test_update_on_new_session_raises(self):
         """If rpc.update() fails on a new session, rpc should be reset."""
         mock_rpc = MagicMock()
         mock_rpc.update.side_effect = ConnectionResetError("reset")
-        rpc, active = self._run_one_iteration(mock_rpc, active=True, presence_active=False)
+        rpc, active, _ = self._run_one_iteration(mock_rpc, active=True, presence_active=False)
         assert rpc is None
         assert active is False
