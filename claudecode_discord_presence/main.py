@@ -76,10 +76,54 @@ def remove_pid_file() -> None:
         pass
 
 
+def _is_process_alive_windows(pid: int) -> bool:
+    """Non-destructive liveness check for Windows.
+
+    IMPORTANT: os.kill(pid, 0) must NOT be used on Windows — for any signal
+    other than CTRL_C/CTRL_BREAK it calls TerminateProcess, which actually
+    *kills* the target process instead of just probing it. We open the process
+    with SYNCHRONIZE access and use WaitForSingleObject with a zero timeout:
+    WAIT_TIMEOUT means it is still running; WAIT_OBJECT_0 means it has exited.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    if pid <= 0:
+        return False
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+    SYNCHRONIZE = 0x00100000
+    WAIT_TIMEOUT = 0x00000102
+
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    if not handle:
+        # Could not open the process — treat as not alive (e.g. it exited).
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def is_process_alive(pid: int) -> bool:
-    """Check if a process with the given PID is alive."""
+    """Check if a process with the given PID is alive.
+
+    This is a read-only probe and must never terminate the target process.
+    """
+    if sys.platform == "win32":
+        return _is_process_alive_windows(pid)
     try:
         os.kill(pid, 0)
+        return True
+    except PermissionError:
+        # Process exists but we lack permission to signal it — still alive.
         return True
     except (OSError, ProcessLookupError):
         return False

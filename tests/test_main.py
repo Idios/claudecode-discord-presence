@@ -159,6 +159,44 @@ class TestIsProcessAlive:
         result = is_process_alive(-1)
         assert isinstance(result, bool)
 
+    def test_check_does_not_kill_process(self):
+        """is_process_alive must be a NON-DESTRUCTIVE liveness check.
+
+        Regression: on Windows, os.kill(pid, 0) invokes TerminateProcess and
+        actually KILLS the target process. A liveness check must never
+        terminate the process it inspects. This is the root cause of duplicate
+        presence instances accumulating and the tracked instance disappearing.
+        """
+        import subprocess
+        import sys
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            # The check must report the process as alive.
+            assert is_process_alive(proc.pid) is True
+            # On Windows, os.kill(pid, 0) terminates the target ASYNCHRONOUSLY
+            # (~50ms later), so an immediate poll() is not enough. Confirm the
+            # process stays alive for a sustained window after the check.
+            for _ in range(20):
+                time.sleep(0.05)
+                if proc.poll() is not None:
+                    break
+            assert proc.poll() is None, "is_process_alive terminated the process!"
+            # A repeated check must also leave it running.
+            assert is_process_alive(proc.pid) is True
+            for _ in range(20):
+                time.sleep(0.05)
+                if proc.poll() is not None:
+                    break
+            assert proc.poll() is None, "second check terminated the process!"
+        finally:
+            proc.kill()
+            proc.wait()
+
 
 # --- is_claude_running ---
 
