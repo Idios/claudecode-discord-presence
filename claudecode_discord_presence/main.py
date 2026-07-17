@@ -1,5 +1,6 @@
 """Monitor Claude Code sessions and update Discord Rich Presence."""
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ from pathlib import Path
 
 from pypresence import Presence
 
+from .logsetup import LOG_FILE
 from .single_instance import InstanceLock, PID_FILE, STOP_FILE
 
 CLIENT_ID = "1488214388920815667"
@@ -180,7 +182,7 @@ def _reconcile_presence(active, presence_active, rpc):
     return rpc, presence_active
 
 
-def main() -> None:
+def _run_daemon() -> None:
     lock = InstanceLock(PID_FILE)
     if not lock.acquire():
         print("Another instance is already running. Exiting.")
@@ -211,6 +213,61 @@ def main() -> None:
     finally:
         _drop_rpc(rpc)
         lock.release()
+
+
+def _parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="claudecode-discord-presence")
+    parser.add_argument(
+        "--status", action="store_true",
+        help="Report whether the daemon is running (point-in-time) and exit.",
+    )
+    parser.add_argument(
+        "--stop", action="store_true",
+        help="Ask a running daemon to stop, then exit.",
+    )
+    return parser.parse_args(argv)
+
+
+def _cmd_status() -> None:
+    probe = InstanceLock(PID_FILE)
+    if probe.acquire():
+        probe.release()
+        print("not running")
+    else:
+        try:
+            pid = PID_FILE.read_text().strip() or "unknown"
+        except OSError:
+            pid = "unknown"
+        print(f"running (pid {pid})")
+    print(f"  log: {LOG_FILE}")
+    print(f"  pid: {PID_FILE}")
+
+
+def _cmd_stop() -> None:
+    probe = InstanceLock(PID_FILE)
+    if probe.acquire():
+        probe.release()
+        print("not running")
+        return
+    try:
+        pid = PID_FILE.read_text().strip()
+    except OSError:
+        pid = ""
+    if not pid:
+        print("running but PID unknown; cannot signal stop")
+        return
+    STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STOP_FILE.write_text(pid)
+    print(f"stop requested (pid {pid})")
+
+
+def main() -> None:
+    args = _parse_args()
+    if args.status:
+        return _cmd_status()
+    if args.stop:
+        return _cmd_stop()
+    _run_daemon()
 
 
 if __name__ == "__main__":

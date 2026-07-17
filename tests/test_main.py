@@ -328,7 +328,7 @@ class TestMainSingleInstance:
         monkeypatch.setattr(main_mod, "InstanceLock", lambda path: fake_lock)
 
         with pytest.raises(SystemExit) as exc:
-            main_mod.main()
+            main_mod._run_daemon()
 
         assert exc.value.code == 0
         fake_lock.acquire.assert_called_once()
@@ -347,7 +347,7 @@ class TestMainSingleInstance:
         monkeypatch.setattr(main_mod, "is_claude_running", _boom)
 
         with pytest.raises(RuntimeError):
-            main_mod.main()
+            main_mod._run_daemon()
 
         fake_lock.release.assert_called_once()
 
