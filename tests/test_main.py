@@ -142,18 +142,12 @@ class TestIsClaudeRunning:
         assert isinstance(result, bool)
 
     @patch("claudecode_discord_presence.main.subprocess.run")
-    def test_tasklist_oserror_returns_false(self, mock_run):
-        """If subprocess.run raises OSError, return False."""
+    def test_tasklist_oserror_returns_false(self, mock_run, monkeypatch):
+        """On Windows, an OSError from tasklist must yield False, not raise."""
+        monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
         mock_run.side_effect = OSError("command not found")
-        with patch("claudecode_discord_presence.main.sys") as mock_sys:
-            mock_sys.platform = "win32"
-            # Re-import to pick up the patched sys — but since is_claude_running
-            # reads sys.platform at call time, we patch it directly
-            from claudecode_discord_presence.main import is_claude_running as icr
-        # The function catches OSError internally
-        # Just verify it doesn't raise
-        result = is_claude_running()
-        assert isinstance(result, bool)
+        assert is_claude_running() is False
+        mock_run.assert_called_once()
 
     @patch("claudecode_discord_presence.main.subprocess.run")
     def test_tasklist_empty_stdout(self, mock_run):

@@ -19,16 +19,19 @@ def main() -> None:
         return
     probe.release()  # let the real main process take the lock
 
-    subprocess.Popen(
-        [sys.executable, "-m", "claudecode_discord_presence.main"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
-        if sys.platform == "win32"
-        else 0,
-        start_new_session=True,
-    )
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "claudecode_discord_presence.main"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+            if sys.platform == "win32"
+            else 0,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        print(f"failed to launch presence daemon: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
