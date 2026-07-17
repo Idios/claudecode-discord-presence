@@ -316,39 +316,48 @@ class TestDropRpc:
         assert _drop_rpc(rpc) is None  # must not raise
 
 
-# --- main() single-instance lock ---
+# --- _run_daemon lifecycle ---
 
 
-class TestMainSingleInstance:
-    def test_exits_zero_when_lock_unavailable(self, monkeypatch):
-        from claudecode_discord_presence import main as main_mod
-
+class TestRunDaemonLifecycle:
+    def test_returns_when_lock_unavailable(self, monkeypatch):
+        from claudecode_discord_presence import main as m
         fake_lock = MagicMock()
         fake_lock.acquire.return_value = False
-        monkeypatch.setattr(main_mod, "InstanceLock", lambda path: fake_lock)
-
-        with pytest.raises(SystemExit) as exc:
-            main_mod._run_daemon()
-
-        assert exc.value.code == 0
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: m.logger)
+        # Must not raise and must not enter the loop.
+        m._run_daemon()
         fake_lock.acquire.assert_called_once()
+        fake_lock.release.assert_not_called()
 
-    def test_releases_lock_on_exit(self, monkeypatch):
-        from claudecode_discord_presence import main as main_mod
-
+    def test_stop_sentinel_exits_and_cleans_up(self, monkeypatch):
+        from claudecode_discord_presence import main as m
         fake_lock = MagicMock()
         fake_lock.acquire.return_value = True
-        monkeypatch.setattr(main_mod, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: m.logger)
+        monkeypatch.setattr(m, "_stop_requested", lambda: True)  # stop on first check
+        cleared = []
+        monkeypatch.setattr(m, "_clear_own_stop_sentinel", lambda: cleared.append(True))
+        m._run_daemon()
+        fake_lock.release.assert_called_once()
+        assert cleared == [True]
+
+    def test_releases_lock_on_exception(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: m.logger)
+        monkeypatch.setattr(m, "_stop_requested", lambda: False)
 
         def _boom():
             raise RuntimeError("boom")
 
-        # First loop iteration raises, so the finally-block cleanup must run.
-        monkeypatch.setattr(main_mod, "is_claude_running", _boom)
-
+        monkeypatch.setattr(m, "is_claude_running", _boom)
         with pytest.raises(RuntimeError):
-            main_mod._run_daemon()
-
+            m._run_daemon()
         fake_lock.release.assert_called_once()
 
 

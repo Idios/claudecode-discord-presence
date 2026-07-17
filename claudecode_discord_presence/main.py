@@ -10,11 +10,16 @@ from pathlib import Path
 
 from pypresence import Presence
 
-from .logsetup import LOG_FILE
+import logging
+
+from . import __version__
+from .logsetup import LOG_FILE, configure_logging
 from .single_instance import InstanceLock, PID_FILE, STOP_FILE
 
+logger = logging.getLogger("claudecode_discord_presence")
+
 CLIENT_ID = "1488214388920815667"
-POLL_INTERVAL_SEC = 60
+POLL_INTERVAL_SEC = 15
 STOP_POLL_SEC = 2
 IDLE_TIMEOUT_SEC = 600  # 10 minutes
 SUBPROCESS_TIMEOUT_SEC = 10
@@ -161,7 +166,7 @@ def _reconcile_presence(active, presence_active, rpc):
             try:
                 rpc.update()
                 presence_active = True
-                print("Session active - presence shown.")
+                logger.info("session active - presence shown")
             except Exception:
                 rpc = _drop_rpc(rpc)
                 presence_active = False
@@ -169,7 +174,7 @@ def _reconcile_presence(active, presence_active, rpc):
         try:
             rpc.clear()
             presence_active = False
-            print("Session idle - presence cleared.")
+            logger.info("session idle - presence cleared")
         except Exception:
             rpc = _drop_rpc(rpc)
             presence_active = False
@@ -183,36 +188,43 @@ def _reconcile_presence(active, presence_active, rpc):
 
 
 def _run_daemon() -> None:
+    configure_logging()
     lock = InstanceLock(PID_FILE)
     if not lock.acquire():
-        print("Another instance is already running. Exiting.")
-        sys.exit(0)
+        logger.info("another instance holds the lock; exiting")
+        return
+
+    logger.info(
+        "started pid=%s version=%s platform=%s poll=%ss idle=%ss",
+        os.getpid(), __version__, sys.platform,
+        POLL_INTERVAL_SEC, IDLE_TIMEOUT_SEC,
+    )
 
     projects_dir = get_claude_projects_dir()
     presence_active = False
     rpc: Presence | None = None
-
-    print("claudecode-discord-presence started.")
-    print(f"  Monitoring: {projects_dir}")
-    print(f"  Poll interval: {POLL_INTERVAL_SEC}s")
-    print(f"  Idle timeout: {IDLE_TIMEOUT_SEC}s")
+    exit_reason = "unknown"
 
     try:
         while True:
-            # Exit if Claude Code process is gone.
+            if _stop_requested():
+                exit_reason = "stop requested"
+                break
             if not is_claude_running():
-                print("Claude Code is not running. Exiting.")
-                return
-
+                exit_reason = "claude gone"
+                break
             active = is_session_active(projects_dir, IDLE_TIMEOUT_SEC)
             rpc, presence_active = _reconcile_presence(active, presence_active, rpc)
-
-            time.sleep(POLL_INTERVAL_SEC)
+            if _sleep_until_poll():
+                exit_reason = "stop requested"
+                break
     except KeyboardInterrupt:
-        pass
+        exit_reason = "interrupted"
     finally:
+        logger.info("exiting: %s", exit_reason)
         _drop_rpc(rpc)
         lock.release()
+        _clear_own_stop_sentinel()
 
 
 def _parse_args(argv=None) -> argparse.Namespace:
