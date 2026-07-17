@@ -343,6 +343,24 @@ class TestMainSingleInstance:
         assert exc.value.code == 0
         fake_lock.acquire.assert_called_once()
 
+    def test_releases_lock_on_exit(self, monkeypatch):
+        from claudecode_discord_presence import main as main_mod
+
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        monkeypatch.setattr(main_mod, "InstanceLock", lambda path: fake_lock)
+
+        def _boom():
+            raise RuntimeError("boom")
+
+        # First loop iteration raises, so the finally-block cleanup must run.
+        monkeypatch.setattr(main_mod, "is_claude_running", _boom)
+
+        with pytest.raises(RuntimeError):
+            main_mod.main()
+
+        fake_lock.release.assert_called_once()
+
 
 class TestStopRequested:
     def test_no_sentinel(self, tmp_path, monkeypatch):
@@ -410,21 +428,3 @@ class TestClearOwnStopSentinel:
         monkeypatch.setattr(m, "STOP_FILE", f)
         m._clear_own_stop_sentinel()
         assert f.exists()
-
-    def test_releases_lock_on_exit(self, monkeypatch):
-        from claudecode_discord_presence import main as main_mod
-
-        fake_lock = MagicMock()
-        fake_lock.acquire.return_value = True
-        monkeypatch.setattr(main_mod, "InstanceLock", lambda path: fake_lock)
-
-        def _boom():
-            raise RuntimeError("boom")
-
-        # First loop iteration raises, so the finally-block cleanup must run.
-        monkeypatch.setattr(main_mod, "is_claude_running", _boom)
-
-        with pytest.raises(RuntimeError):
-            main_mod.main()
-
-        fake_lock.release.assert_called_once()
