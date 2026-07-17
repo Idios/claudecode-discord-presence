@@ -233,66 +233,56 @@ class TestConnectRpc:
         assert result is None
 
 
-# --- Main loop RPC error handling ---
+# --- _reconcile_presence ---
 
 
-class TestMainLoopRpcErrors:
-    """Test that the main loop handles RPC failures gracefully.
-
-    These tests patch out sleep and sys.exit to run a controlled number
-    of loop iterations.
-    """
-
-    def _run_one_iteration(self, rpc_mock, active: bool, presence_active: bool):
-        """Simulate one iteration of the main loop's RPC logic."""
-        from claudecode_discord_presence.main import connect_rpc, CLIENT_ID
-
-        if active and not presence_active:
-            rpc = rpc_mock
-            if rpc is not None:
-                try:
-                    rpc.update()
-                    return rpc, True
-                except Exception:
-                    return None, False
-            return None, False
-        elif not active and presence_active:
-            if rpc_mock is not None:
-                try:
-                    rpc_mock.clear()
-                except Exception:
-                    pass
-            return rpc_mock, False
-        elif active and presence_active:
-            if rpc_mock is not None:
-                try:
-                    rpc_mock.update()
-                    return rpc_mock, True
-                except Exception:
-                    return None, False
-            return None, False
-        return rpc_mock, presence_active
-
-    def test_update_raises_clears_presence(self):
-        """If rpc.update() raises, presence should be deactivated."""
+class TestReconcilePresence:
+    def test_activates_and_shows_presence(self, monkeypatch):
+        from claudecode_discord_presence import main as m
         mock_rpc = MagicMock()
-        mock_rpc.update.side_effect = BrokenPipeError("pipe broken")
-        rpc, active = self._run_one_iteration(mock_rpc, active=True, presence_active=True)
+        monkeypatch.setattr(m, "connect_rpc", lambda cid: mock_rpc)
+        rpc, active = m._reconcile_presence(True, False, None)
+        assert rpc is mock_rpc
+        assert active is True
+        mock_rpc.update.assert_called_once()
+
+    def test_activation_update_failure_drops_rpc(self):
+        from claudecode_discord_presence import main as m
+        mock_rpc = MagicMock()
+        mock_rpc.update.side_effect = BrokenPipeError()
+        rpc, active = m._reconcile_presence(True, False, mock_rpc)
         assert rpc is None
         assert active is False
 
-    def test_clear_raises_still_deactivates(self):
-        """If rpc.clear() raises, presence should still be deactivated."""
+    def test_idle_clears_presence(self):
+        from claudecode_discord_presence import main as m
         mock_rpc = MagicMock()
-        mock_rpc.clear.side_effect = OSError("IPC error")
-        rpc, active = self._run_one_iteration(mock_rpc, active=False, presence_active=True)
+        rpc, active = m._reconcile_presence(False, True, mock_rpc)
+        assert rpc is mock_rpc
+        assert active is False
+        mock_rpc.clear.assert_called_once()
+
+    def test_idle_clear_failure_drops_rpc(self):
+        from claudecode_discord_presence import main as m
+        mock_rpc = MagicMock()
+        mock_rpc.clear.side_effect = OSError()
+        rpc, active = m._reconcile_presence(False, True, mock_rpc)
+        assert rpc is None
         assert active is False
 
-    def test_update_on_new_session_raises(self):
-        """If rpc.update() fails on a new session, rpc should be reset."""
+    def test_continue_updates(self):
+        from claudecode_discord_presence import main as m
         mock_rpc = MagicMock()
-        mock_rpc.update.side_effect = ConnectionResetError("reset")
-        rpc, active = self._run_one_iteration(mock_rpc, active=True, presence_active=False)
+        rpc, active = m._reconcile_presence(True, True, mock_rpc)
+        assert rpc is mock_rpc
+        assert active is True
+        mock_rpc.update.assert_called_once()
+
+    def test_continue_update_failure_drops_rpc(self):
+        from claudecode_discord_presence import main as m
+        mock_rpc = MagicMock()
+        mock_rpc.update.side_effect = ConnectionResetError()
+        rpc, active = m._reconcile_presence(True, True, mock_rpc)
         assert rpc is None
         assert active is False
 

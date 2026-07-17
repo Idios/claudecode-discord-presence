@@ -146,6 +146,40 @@ def _drop_rpc(rpc):
     return None
 
 
+def _reconcile_presence(active, presence_active, rpc):
+    """Reconcile Discord presence with session state. Returns (rpc, presence_active).
+
+    Callers MUST assign both return values so the daemon's finally sees the
+    latest rpc. (Logging replaces the prints in a later task.)
+    """
+    if active and not presence_active:
+        if rpc is None:
+            rpc = connect_rpc(CLIENT_ID)
+        if rpc is not None:
+            try:
+                rpc.update()
+                presence_active = True
+                print("Session active - presence shown.")
+            except Exception:
+                rpc = _drop_rpc(rpc)
+                presence_active = False
+    elif not active and presence_active:
+        try:
+            rpc.clear()
+            presence_active = False
+            print("Session idle - presence cleared.")
+        except Exception:
+            rpc = _drop_rpc(rpc)
+            presence_active = False
+    elif active and presence_active:
+        try:
+            rpc.update()
+        except Exception:
+            rpc = _drop_rpc(rpc)
+            presence_active = False
+    return rpc, presence_active
+
+
 def main() -> None:
     lock = InstanceLock(PID_FILE)
     if not lock.acquire():
@@ -169,34 +203,7 @@ def main() -> None:
                 return
 
             active = is_session_active(projects_dir, IDLE_TIMEOUT_SEC)
-
-            if active and not presence_active:
-                if rpc is None:
-                    rpc = connect_rpc(CLIENT_ID)
-                if rpc is not None:
-                    try:
-                        rpc.update()
-                        presence_active = True
-                        print("Session active - presence shown.")
-                    except Exception:
-                        rpc = _drop_rpc(rpc)
-                        presence_active = False
-
-            elif not active and presence_active:
-                try:
-                    rpc.clear()
-                    presence_active = False
-                    print("Session idle - presence cleared.")
-                except Exception:
-                    rpc = _drop_rpc(rpc)
-                    presence_active = False
-
-            elif active and presence_active:
-                try:
-                    rpc.update()
-                except Exception:
-                    rpc = _drop_rpc(rpc)
-                    presence_active = False
+            rpc, presence_active = _reconcile_presence(active, presence_active, rpc)
 
             time.sleep(POLL_INTERVAL_SEC)
     except KeyboardInterrupt:
