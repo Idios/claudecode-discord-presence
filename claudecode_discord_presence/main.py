@@ -220,6 +220,12 @@ def _run_daemon() -> None:
                 break
     except KeyboardInterrupt:
         exit_reason = "interrupted"
+    except Exception:
+        # Detached daemon: stderr is DEVNULL, so log the traceback to the file
+        # before it is lost. Re-raise so behavior is otherwise unchanged.
+        exit_reason = "unexpected exception"
+        logger.exception("unexpected exception in daemon loop")
+        raise
     finally:
         logger.info("exiting: %s", exit_reason)
         _drop_rpc(rpc)

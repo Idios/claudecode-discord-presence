@@ -354,6 +354,27 @@ class TestRunDaemonLifecycle:
             m._run_daemon()
         fake_lock.release.assert_called_once()
 
+    def test_logs_traceback_on_unexpected_exception(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: None)
+        monkeypatch.setattr(m, "_stop_requested", lambda: False)
+        monkeypatch.setattr(m, "_clear_own_stop_sentinel", lambda: None)
+        mock_logger = MagicMock()
+        monkeypatch.setattr(m, "logger", mock_logger)
+
+        def _boom():
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(m, "is_claude_running", _boom)
+        with pytest.raises(RuntimeError):
+            m._run_daemon()
+        # The traceback must be logged (stderr is DEVNULL for the detached daemon).
+        mock_logger.exception.assert_called_once()
+        fake_lock.release.assert_called_once()
+
 
 class TestStopRequested:
     def test_no_sentinel(self, tmp_path, monkeypatch):
