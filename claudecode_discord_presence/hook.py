@@ -1,22 +1,24 @@
 """Claude Code hook entry point.
 
-Started by SessionStart hook. Launches main process in background
-if not already running.
+Started by the SessionStart hook. Launches the main process in the background
+unless one is already running. The probe below is only a cheap optimization —
+the real single-instance guarantee is the lock that main() itself holds.
 """
 
 import subprocess
 import sys
-from pathlib import Path
 
-from .main import is_already_running
+from .single_instance import InstanceLock, PID_FILE
 
 
 def main() -> None:
-    if is_already_running():
+    # Cheap, non-authoritative check: if the lock is already held, skip the
+    # cost of spawning a process that would only exit immediately.
+    probe = InstanceLock(PID_FILE)
+    if not probe.acquire():
         return
+    probe.release()  # let the real main process take the lock
 
-    # Launch main process in background
-    main_module = Path(__file__).parent / "main.py"
     subprocess.Popen(
         [sys.executable, "-m", "claudecode_discord_presence.main"],
         stdout=subprocess.DEVNULL,
