@@ -343,6 +343,74 @@ class TestMainSingleInstance:
         assert exc.value.code == 0
         fake_lock.acquire.assert_called_once()
 
+
+class TestStopRequested:
+    def test_no_sentinel(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setattr(m, "STOP_FILE", tmp_path / "stop")
+        assert m._stop_requested() is False
+
+    def test_sentinel_own_pid(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text(str(os.getpid()))
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        assert m._stop_requested() is True
+
+    def test_sentinel_other_pid_is_cleaned(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text("999999")
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        assert m._stop_requested() is False
+        assert not f.exists()
+
+    def test_sentinel_garbage(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text("not-a-pid")
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        assert m._stop_requested() is False
+
+
+class TestSleepUntilPoll:
+    def test_true_immediately_when_stop(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text(str(os.getpid()))
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        slept = []
+        monkeypatch.setattr(m.time, "sleep", lambda s: slept.append(s))
+        assert m._sleep_until_poll() is True
+        assert slept == []
+
+    def test_sleeps_full_interval_without_stop(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setattr(m, "STOP_FILE", tmp_path / "absent")
+        slept = []
+        monkeypatch.setattr(m.time, "sleep", lambda s: slept.append(s))
+        assert m._sleep_until_poll() is False
+        expected = len(range(0, m.POLL_INTERVAL_SEC, m.STOP_POLL_SEC))
+        assert len(slept) == expected
+
+
+class TestClearOwnStopSentinel:
+    def test_removes_own(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text(str(os.getpid()))
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        m._clear_own_stop_sentinel()
+        assert not f.exists()
+
+    def test_keeps_other_pid(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text("999999")
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        m._clear_own_stop_sentinel()
+        assert f.exists()
+
     def test_releases_lock_on_exit(self, monkeypatch):
         from claudecode_discord_presence import main as main_mod
 

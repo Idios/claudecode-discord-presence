@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 PID_FILE = Path.home() / ".claude" / "claudecode-discord-presence.pid"
+STOP_FILE = Path.home() / ".claude" / "claudecode-discord-presence.stop"
 
 if sys.platform == "win32":
     import msvcrt

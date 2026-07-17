@@ -56,3 +56,9 @@ def test_acquire_creates_parent_dirs(tmp_path):
 def test_release_without_acquire_is_safe(tmp_path):
     lock = InstanceLock(tmp_path / "x.pid")
     lock.release()  # must not raise
+
+
+def test_stop_file_default_path():
+    from claudecode_discord_presence.single_instance import STOP_FILE
+    assert STOP_FILE.name == "claudecode-discord-presence.stop"
+    assert STOP_FILE.parent.name == ".claude"
