@@ -405,3 +405,32 @@ class TestMainLoopRpcErrors:
         rpc, active = self._run_one_iteration(mock_rpc, active=True, presence_active=False)
         assert rpc is None
         assert active is False
+
+
+# --- _drop_rpc ---
+
+
+class TestDropRpc:
+    def test_none_is_safe(self):
+        from claudecode_discord_presence.main import _drop_rpc
+        assert _drop_rpc(None) is None
+
+    def test_clears_and_closes(self):
+        from claudecode_discord_presence.main import _drop_rpc
+        rpc = MagicMock()
+        assert _drop_rpc(rpc) is None
+        rpc.clear.assert_called_once()
+        rpc.close.assert_called_once()
+
+    def test_close_called_even_if_clear_raises(self):
+        from claudecode_discord_presence.main import _drop_rpc
+        rpc = MagicMock()
+        rpc.clear.side_effect = OSError("ipc")
+        assert _drop_rpc(rpc) is None
+        rpc.close.assert_called_once()
+
+    def test_no_raise_if_close_raises(self):
+        from claudecode_discord_presence.main import _drop_rpc
+        rpc = MagicMock()
+        rpc.close.side_effect = OSError("ipc")
+        assert _drop_rpc(rpc) is None  # must not raise

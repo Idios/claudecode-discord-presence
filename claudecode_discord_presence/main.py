@@ -124,6 +124,24 @@ def is_already_running() -> bool:
     return is_process_alive(pid)
 
 
+def _drop_rpc(rpc):
+    """Best-effort clear + close, then discard the connection. Returns None.
+
+    Used on every RPC failure path so sockets are never leaked. Callers
+    reassign: ``rpc = _drop_rpc(rpc)``.
+    """
+    if rpc is not None:
+        try:
+            rpc.clear()
+        except Exception:
+            pass
+        try:
+            rpc.close()
+        except Exception:
+            pass
+    return None
+
+
 def main() -> None:
     if is_already_running():
         print("Another instance is already running. Exiting.")
@@ -177,24 +195,26 @@ def main() -> None:
                     presence_active = True
                     print("Session active - presence shown.")
                 except Exception:
-                    rpc = None
+                    rpc = _drop_rpc(rpc)
+                    presence_active = False
 
         elif not active and presence_active:
-            if rpc is not None:
-                try:
-                    rpc.clear()
-                    print("Session idle - presence cleared.")
-                except Exception:
-                    pass
-            presence_active = False
+            try:
+                rpc.clear()
+                presence_active = False
+                print("Session idle - presence cleared.")
+            except Exception:
+                # Drop the connection so the next loop reconnects instead of
+                # leaving a stale presence shown.
+                rpc = _drop_rpc(rpc)
+                presence_active = False
 
         elif active and presence_active:
-            if rpc is not None:
-                try:
-                    rpc.update()
-                except Exception:
-                    rpc = None
-                    presence_active = False
+            try:
+                rpc.update()
+            except Exception:
+                rpc = _drop_rpc(rpc)
+                presence_active = False
 
         time.sleep(POLL_INTERVAL_SEC)
 
