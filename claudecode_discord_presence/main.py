@@ -1,22 +1,20 @@
 """Monitor Claude Code sessions and update Discord Rich Presence."""
 
-import os
 import shutil
-import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from pypresence import Presence, exceptions as rpc_exceptions
+from pypresence import Presence
+
+from .single_instance import InstanceLock, PID_FILE
 
 CLIENT_ID = "1488214388920815667"
 POLL_INTERVAL_SEC = 60
 IDLE_TIMEOUT_SEC = 600  # 10 minutes
 SUBPROCESS_TIMEOUT_SEC = 10
 CLAUDE_PROCESS_NAME = "claude.exe" if sys.platform == "win32" else "claude"
-
-PID_FILE = Path.home() / ".claude" / "claudecode-discord-presence.pid"
 
 
 def get_claude_projects_dir() -> Path:
@@ -62,29 +60,6 @@ def connect_rpc(client_id: str) -> Presence | None:
         return None
 
 
-def write_pid_file() -> None:
-    """Write current process PID to the PID file."""
-    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(os.getpid()))
-
-
-def remove_pid_file() -> None:
-    """Remove the PID file if it exists."""
-    try:
-        PID_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def is_process_alive(pid: int) -> bool:
-    """Check if a process with the given PID is alive."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
-
-
 def is_claude_running() -> bool:
     """Check if any Claude Code process is running."""
     if sys.platform == "win32":
@@ -111,19 +86,6 @@ def is_claude_running() -> bool:
             return False
 
 
-def is_already_running() -> bool:
-    """Check if another instance is already running via PID file."""
-    if not PID_FILE.exists():
-        return False
-    try:
-        pid = int(PID_FILE.read_text().strip())
-    except (ValueError, OSError):
-        return False
-    if pid == os.getpid():
-        return False
-    return is_process_alive(pid)
-
-
 def _drop_rpc(rpc):
     """Best-effort clear + close, then discard the connection. Returns None.
 
@@ -143,80 +105,63 @@ def _drop_rpc(rpc):
 
 
 def main() -> None:
-    if is_already_running():
+    lock = InstanceLock(PID_FILE)
+    if not lock.acquire():
         print("Another instance is already running. Exiting.")
         sys.exit(0)
 
-    write_pid_file()
     projects_dir = get_claude_projects_dir()
     presence_active = False
     rpc: Presence | None = None
-
-    def shutdown(signum: int, frame: object) -> None:
-        nonlocal rpc
-        if rpc is not None:
-            try:
-                rpc.clear()
-                rpc.close()
-            except Exception:
-                pass
-        remove_pid_file()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
 
     print("claudecode-discord-presence started.")
     print(f"  Monitoring: {projects_dir}")
     print(f"  Poll interval: {POLL_INTERVAL_SEC}s")
     print(f"  Idle timeout: {IDLE_TIMEOUT_SEC}s")
 
-    while True:
-        # Exit if Claude Code process is gone
-        if not is_claude_running():
-            if rpc is not None:
+    try:
+        while True:
+            # Exit if Claude Code process is gone.
+            if not is_claude_running():
+                print("Claude Code is not running. Exiting.")
+                return
+
+            active = is_session_active(projects_dir, IDLE_TIMEOUT_SEC)
+
+            if active and not presence_active:
+                if rpc is None:
+                    rpc = connect_rpc(CLIENT_ID)
+                if rpc is not None:
+                    try:
+                        rpc.update()
+                        presence_active = True
+                        print("Session active - presence shown.")
+                    except Exception:
+                        rpc = _drop_rpc(rpc)
+                        presence_active = False
+
+            elif not active and presence_active:
                 try:
                     rpc.clear()
-                    rpc.close()
-                except Exception:
-                    pass
-            remove_pid_file()
-            print("Claude Code is not running. Exiting.")
-            sys.exit(0)
-
-        active = is_session_active(projects_dir, IDLE_TIMEOUT_SEC)
-
-        if active and not presence_active:
-            if rpc is None:
-                rpc = connect_rpc(CLIENT_ID)
-            if rpc is not None:
-                try:
-                    rpc.update()
-                    presence_active = True
-                    print("Session active - presence shown.")
+                    presence_active = False
+                    print("Session idle - presence cleared.")
                 except Exception:
                     rpc = _drop_rpc(rpc)
                     presence_active = False
 
-        elif not active and presence_active:
-            try:
-                rpc.clear()
-                presence_active = False
-                print("Session idle - presence cleared.")
-            except Exception:
-                # Drop the connection so the next loop reconnects instead of
-                # leaving a stale presence shown.
-                rpc = _drop_rpc(rpc)
-                presence_active = False
+            elif active and presence_active:
+                try:
+                    rpc.update()
+                except Exception:
+                    rpc = _drop_rpc(rpc)
+                    presence_active = False
 
-        elif active and presence_active:
-            try:
-                rpc.update()
-            except Exception:
-                rpc = _drop_rpc(rpc)
-                presence_active = False
-
-        time.sleep(POLL_INTERVAL_SEC)
+            time.sleep(POLL_INTERVAL_SEC)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _drop_rpc(rpc)
+        lock.release()
 
 
 if __name__ == "__main__":

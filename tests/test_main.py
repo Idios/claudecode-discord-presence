@@ -11,13 +11,8 @@ from claudecode_discord_presence.main import (
     connect_rpc,
     find_latest_jsonl_mtime,
     get_claude_projects_dir,
-    is_already_running,
     is_claude_running,
-    is_process_alive,
     is_session_active,
-    remove_pid_file,
-    write_pid_file,
-    PID_FILE,
 )
 
 
@@ -138,28 +133,6 @@ class TestIsSessionActive:
         assert is_session_active(tmp_path, 0) is False
 
 
-# --- is_process_alive ---
-
-
-class TestIsProcessAlive:
-    def test_current_process_is_alive(self):
-        assert is_process_alive(os.getpid()) is True
-
-    def test_nonexistent_pid_is_not_alive(self):
-        assert is_process_alive(99999999) is False
-
-    def test_pid_zero(self):
-        """PID 0 is special (kernel); os.kill(0, 0) sends to process group.
-        Should not crash regardless of result."""
-        result = is_process_alive(0)
-        assert isinstance(result, bool)
-
-    def test_negative_pid(self):
-        """Negative PIDs should not crash."""
-        result = is_process_alive(-1)
-        assert isinstance(result, bool)
-
-
 # --- is_claude_running ---
 
 
@@ -210,89 +183,6 @@ class TestIsClaudeRunning:
             result = main_mod.is_claude_running()
             main_mod.CLAUDE_PROCESS_NAME = original
         assert result is False
-
-
-# --- PID file management ---
-
-
-class TestPidFileManagement:
-    def test_write_and_remove_pid_file(self, tmp_path: Path, monkeypatch):
-        pid_file = tmp_path / "test.pid"
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-
-        write_pid_file()
-        assert pid_file.exists()
-        assert pid_file.read_text() == str(os.getpid())
-
-        remove_pid_file()
-        assert not pid_file.exists()
-
-    def test_remove_nonexistent_pid_file(self, tmp_path: Path, monkeypatch):
-        """Removing a PID file that doesn't exist should not raise."""
-        pid_file = tmp_path / "nonexistent.pid"
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        remove_pid_file()  # should not raise
-
-    def test_write_pid_file_creates_parent_dirs(self, tmp_path: Path, monkeypatch):
-        pid_file = tmp_path / "subdir" / "deep" / "test.pid"
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        write_pid_file()
-        assert pid_file.exists()
-
-
-# --- is_already_running ---
-
-
-class TestIsAlreadyRunning:
-    def test_no_pid_file(self, tmp_path: Path, monkeypatch):
-        pid_file = tmp_path / "nonexistent.pid"
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False
-
-    def test_pid_file_with_own_pid(self, tmp_path: Path, monkeypatch):
-        """PID file containing our own PID should return False."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text(str(os.getpid()))
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False
-
-    def test_pid_file_with_dead_pid(self, tmp_path: Path, monkeypatch):
-        """PID file containing a dead PID should return False."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text("99999999")
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False
-
-    def test_pid_file_empty(self, tmp_path: Path, monkeypatch):
-        """Empty PID file should return False (ValueError on int())."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text("")
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False
-
-    def test_pid_file_garbage(self, tmp_path: Path, monkeypatch):
-        """PID file with non-numeric content should return False."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text("not_a_number")
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False
-
-    def test_pid_file_with_whitespace(self, tmp_path: Path, monkeypatch):
-        """PID file with whitespace-padded number should still parse."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text("  99999999  \n")
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False  # dead PID
-
-    def test_pid_file_with_alive_other_pid(self, tmp_path: Path, monkeypatch):
-        """PID file with a living PID (not ours) should return True."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text("12345")
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        monkeypatch.setattr(
-            "claudecode_discord_presence.main.is_process_alive", lambda pid: True
-        )
-        assert is_already_running() is True
 
 
 # --- connect_rpc ---
@@ -434,3 +324,39 @@ class TestDropRpc:
         rpc = MagicMock()
         rpc.close.side_effect = OSError("ipc")
         assert _drop_rpc(rpc) is None  # must not raise
+
+
+# --- main() single-instance lock ---
+
+
+class TestMainSingleInstance:
+    def test_exits_zero_when_lock_unavailable(self, monkeypatch):
+        from claudecode_discord_presence import main as main_mod
+
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = False
+        monkeypatch.setattr(main_mod, "InstanceLock", lambda path: fake_lock)
+
+        with pytest.raises(SystemExit) as exc:
+            main_mod.main()
+
+        assert exc.value.code == 0
+        fake_lock.acquire.assert_called_once()
+
+    def test_releases_lock_on_exit(self, monkeypatch):
+        from claudecode_discord_presence import main as main_mod
+
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        monkeypatch.setattr(main_mod, "InstanceLock", lambda path: fake_lock)
+
+        def _boom():
+            raise RuntimeError("boom")
+
+        # First loop iteration raises, so the finally-block cleanup must run.
+        monkeypatch.setattr(main_mod, "is_claude_running", _boom)
+
+        with pytest.raises(RuntimeError):
+            main_mod.main()
+
+        fake_lock.release.assert_called_once()
