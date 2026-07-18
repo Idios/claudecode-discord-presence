@@ -18,12 +18,32 @@ from .single_instance import InstanceLock, PID_FILE, STOP_FILE
 
 logger = logging.getLogger("claudecode_discord_presence")
 
+def _env_int(name: str, default: int) -> int:
+    """Return a positive int from env var `name`, or `default` if unset/invalid."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 CLIENT_ID = "1488214388920815667"
-POLL_INTERVAL_SEC = 15
+POLL_INTERVAL_SEC = _env_int("CCDP_POLL_INTERVAL_SEC", 15)
 STOP_POLL_SEC = 2
-IDLE_TIMEOUT_SEC = 600  # 10 minutes
+IDLE_TIMEOUT_SEC = _env_int("CCDP_IDLE_TIMEOUT_SEC", 600)
+EXIT_CONFIRM_COUNT = _env_int("CCDP_EXIT_CONFIRM_COUNT", 3)
 SUBPROCESS_TIMEOUT_SEC = 10
-CLAUDE_PROCESS_NAME = "claude.exe" if sys.platform == "win32" else "claude"
+
+
+def _claude_process_name() -> str:
+    """Resolve the Claude Code process name (env override, else platform default)."""
+    override = os.environ.get("CCDP_CLAUDE_PROCESS_NAME")
+    if override:
+        return override
+    return "claude.exe" if sys.platform == "win32" else "claude"
 
 
 def get_claude_projects_dir() -> Path:
@@ -71,28 +91,37 @@ def connect_rpc(client_id: str) -> Presence | None:
 
 def is_claude_running() -> bool:
     """Check if any Claude Code process is running."""
+    name = _claude_process_name()
     if sys.platform == "win32":
         try:
             result = subprocess.run(
-                ["tasklist", "/NH", "/FI", f"IMAGENAME eq {CLAUDE_PROCESS_NAME}"],
+                ["tasklist", "/NH", "/FI", f"IMAGENAME eq {name}"],
                 capture_output=True, text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 timeout=SUBPROCESS_TIMEOUT_SEC,
             )
-            return CLAUDE_PROCESS_NAME.lower() in result.stdout.lower()
         except (OSError, subprocess.TimeoutExpired):
             return False
-    else:
-        if shutil.which("pgrep") is None:
-            return False
-        try:
-            return subprocess.run(
-                ["pgrep", "-x", CLAUDE_PROCESS_NAME],
-                capture_output=True,
-                timeout=SUBPROCESS_TIMEOUT_SEC,
-            ).returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            return False
+        target = name.lower()
+        # A tasklist /NH data row starts with the image name; the
+        # "INFO: No tasks..." message and unrelated text do not.
+        return any(
+            line.strip().lower().startswith(target)
+            for line in result.stdout.splitlines()
+        )
+    # POSIX detection is EXPERIMENTAL/UNVERIFIED: Claude Code may run as a
+    # `node` process, so `pgrep -x claude` can fail. Override with
+    # CCDP_CLAUDE_PROCESS_NAME. See the platform policy in the design doc.
+    if shutil.which("pgrep") is None:
+        return False
+    try:
+        return subprocess.run(
+            ["pgrep", "-x", name],
+            capture_output=True,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def _stop_requested() -> bool:

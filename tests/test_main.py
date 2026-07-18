@@ -1,6 +1,7 @@
 """Tests for Claude Code session detection, PID management, and RPC logic."""
 
 import os
+import sys
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -149,40 +150,52 @@ class TestIsClaudeRunning:
 
     @patch("claudecode_discord_presence.main.subprocess.run")
     def test_tasklist_oserror_returns_false(self, mock_run, monkeypatch):
-        """On Windows, an OSError from tasklist must yield False, not raise."""
+        """An OSError from tasklist yields False, not a raise."""
         monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
         mock_run.side_effect = OSError("command not found")
         assert is_claude_running() is False
         mock_run.assert_called_once()
 
     @patch("claudecode_discord_presence.main.subprocess.run")
-    def test_tasklist_empty_stdout(self, mock_run):
-        """Empty tasklist output should return False."""
+    def test_tasklist_empty_stdout(self, mock_run, monkeypatch):
+        """Empty tasklist output returns False."""
+        monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
         mock_run.return_value = MagicMock(stdout="", returncode=0)
-        with patch("claudecode_discord_presence.main.sys") as mock_sys:
-            mock_sys.platform = "win32"
-            from claudecode_discord_presence import main as main_mod
-            original = main_mod.CLAUDE_PROCESS_NAME
-            main_mod.CLAUDE_PROCESS_NAME = "claude.exe"
-            result = main_mod.is_claude_running()
-            main_mod.CLAUDE_PROCESS_NAME = original
-        assert result is False
+        assert is_claude_running() is False
 
     @patch("claudecode_discord_presence.main.subprocess.run")
-    def test_tasklist_info_message_no_match(self, mock_run):
-        """tasklist 'INFO: No tasks' message should return False."""
+    def test_tasklist_info_message_no_match(self, mock_run, monkeypatch):
+        """The 'INFO: No tasks' message must not count as a match."""
+        monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
         mock_run.return_value = MagicMock(
             stdout="INFO: No tasks are running which match the specified criteria.",
             returncode=0,
         )
-        with patch("claudecode_discord_presence.main.sys") as mock_sys:
-            mock_sys.platform = "win32"
-            from claudecode_discord_presence import main as main_mod
-            original = main_mod.CLAUDE_PROCESS_NAME
-            main_mod.CLAUDE_PROCESS_NAME = "claude.exe"
-            result = main_mod.is_claude_running()
-            main_mod.CLAUDE_PROCESS_NAME = original
-        assert result is False
+        assert is_claude_running() is False
+
+    @patch("claudecode_discord_presence.main.subprocess.run")
+    def test_tasklist_matches_process_row(self, mock_run, monkeypatch):
+        """A real tasklist row starting with the image name returns True."""
+        monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
+        mock_run.return_value = MagicMock(
+            stdout="claude.exe                    1234 Console                1     50,000 K",
+            returncode=0,
+        )
+        assert is_claude_running() is True
+
+    @patch("claudecode_discord_presence.main.subprocess.run")
+    def test_tasklist_substring_is_not_a_match(self, mock_run, monkeypatch):
+        """A line merely CONTAINING the name (not starting with it) is not a match."""
+        monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
+        mock_run.return_value = MagicMock(
+            stdout="some-wrapper-for-claude.exe    9999 Console                1     10,000 K",
+            returncode=0,
+        )
+        assert is_claude_running() is False
 
 
 # --- connect_rpc ---
@@ -448,3 +461,40 @@ class TestClearOwnStopSentinel:
         monkeypatch.setattr(m, "STOP_FILE", f)
         m._clear_own_stop_sentinel()
         assert f.exists()
+
+
+class TestEnvInt:
+    def test_unset_returns_default(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.delenv("CCDP_TESTVAL", raising=False)
+        assert m._env_int("CCDP_TESTVAL", 42) == 42
+
+    def test_valid_int(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setenv("CCDP_TESTVAL", "7")
+        assert m._env_int("CCDP_TESTVAL", 42) == 7
+
+    def test_non_integer_returns_default(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setenv("CCDP_TESTVAL", "not-a-number")
+        assert m._env_int("CCDP_TESTVAL", 42) == 42
+
+    def test_non_positive_returns_default(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setenv("CCDP_TESTVAL", "0")
+        assert m._env_int("CCDP_TESTVAL", 42) == 42
+        monkeypatch.setenv("CCDP_TESTVAL", "-3")
+        assert m._env_int("CCDP_TESTVAL", 42) == 42
+
+
+class TestClaudeProcessName:
+    def test_default_by_platform(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.delenv("CCDP_CLAUDE_PROCESS_NAME", raising=False)
+        expected = "claude.exe" if sys.platform == "win32" else "claude"
+        assert m._claude_process_name() == expected
+
+    def test_env_override(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "custom-proc")
+        assert m._claude_process_name() == "custom-proc"
