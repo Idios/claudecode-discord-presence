@@ -1,20 +1,25 @@
 # claudecode-discord-presence
 
+![CI](https://github.com/Idios/claudecode-discord-presence/actions/workflows/ci.yml/badge.svg)
+
 Show your Claude Code session as Discord Rich Presence status.
 
-When Claude Code is actively running, your Discord profile displays "Playing 🦀ClaudeCode🦀". The presence is automatically cleared and the process exits when the session goes idle.
+When Claude Code is actively running, your Discord profile displays "Playing 🦀ClaudeCode🦀". While a session is idle the presence is cleared, and the background process exits automatically once Claude Code itself is no longer running.
 
 ## How It Works
 
-Claude Code writes session logs to `~/.claude/projects/` as `.jsonl` files. This tool polls those files and shows Discord Rich Presence when any file has been updated within the last 10 minutes.
+Claude Code writes session logs to `~/.claude/projects/` as `.jsonl` files. This tool polls those files and shows Discord Rich Presence when any file has been recently updated.
 
 ```
 Claude Code starts
   → SessionStart hook → launches background process
     → polls .jsonl files → Discord RPC → "Playing 🦀ClaudeCode🦀"
 
-Claude Code stops
-  → .jsonl files stop updating → 10 min idle → process exits automatically
+Session idle (no .jsonl updates for a while)
+  → presence cleared (process keeps monitoring)
+
+Claude Code process gone (confirmed over several polls)
+  → process exits automatically
 ```
 
 No HTTP server, no daemon manager — just a hook, a polling loop, and auto-exit.
@@ -47,15 +52,19 @@ If you are reading this in a Claude Code session, follow these steps to set up t
      "hooks": {
        "SessionStart": [
          {
-           "type": "command",
-           "command": "python -m claudecode_discord_presence.hook"
+           "hooks": [
+             {
+               "type": "command",
+               "command": "claudecode-discord-presence-hook"
+             }
+           ]
          }
        ]
      }
    }
    ```
 
-4. **Restart Claude Code**. The tool will automatically start in the background when a session begins, and exit when idle for 10 minutes.
+4. **Restart Claude Code**. The tool starts automatically in the background when a session begins, and exits automatically once Claude Code is no longer running.
 
 5. **Verify**: The user should see "Playing 🦀ClaudeCode🦀" on their Discord profile while a Claude Code session is active.
 
@@ -75,13 +84,21 @@ python -m claudecode_discord_presence.main
 
 ## Configuration
 
-Edit constants in `claudecode_discord_presence/main.py`:
+Set environment variables before the tool starts (no source editing required). Invalid values fall back to the default.
 
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `POLL_INTERVAL_SEC` | `60` | How often to check for session activity (seconds) |
-| `IDLE_TIMEOUT_SEC` | `600` | Time without updates before auto-exit (seconds) |
-| `CLIENT_ID` | `1488214388920815667` | Discord Application ID |
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `CCDP_POLL_INTERVAL_SEC` | `15` | How often to check for session activity (seconds) |
+| `CCDP_IDLE_TIMEOUT_SEC` | `600` | Idle time (no `.jsonl` updates) before the presence is cleared (seconds) |
+| `CCDP_EXIT_CONFIRM_COUNT` | `3` | Consecutive polls with Claude Code absent before the process exits |
+| `CCDP_CLAUDE_PROCESS_NAME` | `claude.exe` (Windows) | Process name to detect (override if yours differs) |
+
+You can also inspect and control a running instance:
+
+```bash
+claudecode-discord-presence --status   # report whether the daemon is running
+claudecode-discord-presence --stop      # ask a running daemon to stop
+```
 
 ## Running Tests
 
@@ -108,24 +125,16 @@ python -m pytest -v
    Remove-Item -Recurse -Force ~/claudecode-discord-presence
    ```
 
-4. **Remove the PID file** (if it exists):
-   ```bash
-   # macOS/Linux
-   rm -f ~/.claude/claudecode-discord-presence.pid
-
-   # Windows (PowerShell)
-   Remove-Item -Force ~/.claude/claudecode-discord-presence.pid
-   ```
+4. **Leftover files** (`~/.claude/claudecode-discord-presence.pid`, `.pid.lock`, `.stop`) are normally removed automatically when the process exits. If any remain after an abnormal shutdown, they are harmless and can be deleted manually.
 
 ## Platform Support
 
-This tool is designed for the **Claude Code desktop app (CLI)** running locally with the **Discord desktop app**.
+This tool is **built and tested for Windows** with the Claude Code CLI and the Discord desktop app running locally.
 
 | Platform | Status | Process detection | Notes |
 |----------|--------|-------------------|-------|
-| Windows (x64) | Tested | `tasklist` for `claude.exe` | Requires Git Bash (included with Git for Windows) for hooks |
-| macOS | Untested | `pgrep` for `claude` | Process name may differ — verify with `pgrep -x claude` |
-| Linux | Untested | `pgrep` for `claude` | Process name may differ — verify with `pgrep -x claude` |
+| Windows (x64) | **Supported / Tested** | `tasklist` for `claude.exe` | Requires Git Bash (included with Git for Windows) for hooks |
+| macOS / Linux | **Experimental / Unverified** | `pgrep` for `claude` | The test suite runs in CI on these OSes, but Discord integration and process detection are unverified. Claude Code may run as a `node` process; override the name with `CCDP_CLAUDE_PROCESS_NAME`. |
 
 ### Not supported
 
@@ -135,7 +144,7 @@ This tool is designed for the **Claude Code desktop app (CLI)** running locally 
 
 ### Troubleshooting process detection
 
-If the tool exits immediately, the process name may differ on your platform. Check with:
+If the tool exits, the process name may differ on your platform. Check with:
 
 ```bash
 # Windows
@@ -145,7 +154,7 @@ tasklist | findstr -i claude
 ps aux | grep -i claude
 ```
 
-If the process name is different, update `CLAUDE_PROCESS_NAME` in `claudecode_discord_presence/main.py`.
+If the process name is different, set `CCDP_CLAUDE_PROCESS_NAME` to the correct name (do not edit the source).
 
 ## License
 
