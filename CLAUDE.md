@@ -8,8 +8,8 @@ claudecode-discord-presence is a lightweight Python tool that displays "Playing 
 
 ## Supported Platforms
 
-- **Windows (x64) + Claude Code CLI + Discord desktop app** — tested and supported.
-- **macOS / Linux** — untested. Process detection uses `pgrep -x claude`; the process name may differ.
+- **Windows (x64) + Claude Code CLI + Discord desktop app** — supported and tested (incl. CI).
+- **macOS / Linux** — experimental/unverified. The test suite runs in CI on these OSes, but Discord integration and process detection are not verified. Claude Code may run as a `node` process, so `pgrep -x claude` can fail; override with the `CCDP_CLAUDE_PROCESS_NAME` environment variable.
 - **NOT supported**: Claude Code Web (claude.ai/code), IDE extensions (VS Code, JetBrains), Discord browser/mobile.
 
 ## If the User Wants to Set Up This Tool
@@ -21,7 +21,7 @@ When a user shares this repository URL and asks you to set it up, follow the ste
 - The Discord desktop app must be running for the tool to work.
 - After setup, **restart Claude Code** for the hook to take effect.
 - The tool starts automatically on session start and exits when idle — no manual process management needed.
-- If the tool exits immediately on macOS/Linux, the Claude Code process name may differ. Ask the user to run `ps aux | grep -i claude` and update `CLAUDE_PROCESS_NAME` in `main.py` accordingly.
+- If the tool exits immediately on macOS/Linux, the Claude Code process name may differ. Ask the user to run `ps aux | grep -i claude` and set the `CCDP_CLAUDE_PROCESS_NAME` environment variable accordingly (do not edit the source).
 
 ## If the User Wants to Uninstall This Tool
 
@@ -29,17 +29,18 @@ Follow the "Uninstallation" section of README.md:
 1. Remove the hook entry from `~/.claude/settings.json`
 2. `pip uninstall claudecode-discord-presence`
 3. Remove the cloned repository directory
-4. Remove `~/.claude/claudecode-discord-presence.pid` if it exists
+4. Leftover files (`~/.claude/claudecode-discord-presence.pid`, `.pid.lock`, `.stop`) are removed automatically on normal exit; delete any residue manually if needed
 
 ## Project Structure
 
 ```
 claudecode_discord_presence/
-  __init__.py    # Version
-  main.py        # Polling loop, Discord RPC, PID management, auto-exit
-  hook.py        # Hook entry point — launches main.py in background
-tests/
-  test_main.py   # Unit tests for session detection and PID logic
+  __init__.py         # Version (single source; pyproject reads it dynamically)
+  main.py             # CLI dispatch, daemon loop, Discord RPC, --status/--stop
+  hook.py             # SessionStart hook entry — launches the daemon in background
+  single_instance.py  # Atomic OS lock (InstanceLock), PID_FILE / STOP_FILE
+  logsetup.py         # Daemon-only rotating file logging
+tests/                # Unit + integration tests (incl. N-hooks -> 1-process)
 ```
 
 ## Development Commands
@@ -53,9 +54,21 @@ python -m claudecode_discord_presence.hook  # Simulate hook (launches background
 
 ## Key Design Decisions
 
-- **SessionStart hook** launches the process; **idle detection** stops it. No SessionEnd hook is used because Claude Code may not fire it on abnormal exit.
-- **PID file** (`~/.claude/claudecode-discord-presence.pid`) prevents duplicate instances.
-- **No HTTP daemon** — uses file polling only for simplicity.
-- **pypresence** is the sole dependency for Discord RPC.
-- Session activity is detected by checking `.jsonl` file modification times.
-- Idle timeout is 10 minutes; polling interval is 1 minute.
+- **SessionStart hook** launches the daemon; the daemon exits on its own. No SessionEnd hook is used because Claude Code may not fire it on abnormal exit.
+- **No HTTP daemon** — file polling only, for simplicity.
+- **pypresence** is the sole runtime dependency (Discord RPC).
+- Session activity is detected by `.jsonl` file modification times.
+- Poll interval is 15s; idle timeout is 10 minutes (clears presence only). All tunables are `CCDP_*` env vars.
+- Exit is a single condition: the Claude Code process absent for `EXIT_CONFIRM_COUNT` (default 3) consecutive polls.
+
+## Invariants and Known Traps
+
+Read this before changing lifecycle, locking, or process detection — these guardrails exist because a prior version accumulated 33 orphaned processes.
+
+- **Single-instance is guaranteed by an atomic OS lock** (`InstanceLock` in `single_instance.py`), held for the process lifetime — NOT by the PID file's text content. Never reintroduce a "check then write PID" pattern (it is a TOCTOU race).
+- **Never use `os.kill(pid, 0)` on Windows** — Python's `os.kill` there calls `TerminateProcess`, which *kills* the target. There is no liveness polling; the OS lock handles single-instance, and it is released automatically on any exit.
+- **Keep the `N hooks -> exactly 1 process` integration test green** (`tests/test_single_instance_integration.py`). It is the regression anchor for the original bug.
+- **Logging is daemon-only (single writer).** `configure_logging()` is called only by the daemon; the hook and `--status`/`--stop` print to stderr/stdout. Do not attach the rotating file handler from a second process (Windows rotation corruption).
+- **The STOP sentinel is PID-matched**: `--stop` writes the running daemon's PID; the daemon acts only on its own PID and deletes stale/foreign sentinels.
+- **Exit is one debounced condition** (Claude absent for N consecutive polls). Do not add ad-hoc exit paths; a transient process-check failure must not kill a live session.
+- **Process detection must be exact** (a tasklist row that *starts with* the image name), not a loose substring — and the name comes from `CCDP_CLAUDE_PROCESS_NAME` / platform default, never a hardcoded edit.
