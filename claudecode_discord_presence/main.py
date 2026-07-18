@@ -233,15 +233,20 @@ def _run_daemon() -> None:
     presence_active = False
     rpc: Presence | None = None
     exit_reason = "unknown"
+    missed = 0
 
     try:
         while True:
             if _stop_requested():
                 exit_reason = "stop requested"
                 break
-            if not is_claude_running():
-                exit_reason = "claude gone"
-                break
+            if is_claude_running():
+                missed = 0
+            else:
+                missed += 1
+                if missed >= EXIT_CONFIRM_COUNT:
+                    exit_reason = "claude gone"
+                    break
             active = is_session_active(projects_dir, IDLE_TIMEOUT_SEC)
             rpc, presence_active = _reconcile_presence(active, presence_active, rpc)
             if _sleep_until_poll():

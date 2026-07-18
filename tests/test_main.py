@@ -394,6 +394,42 @@ class TestRunDaemonLifecycle:
         mock_logger.exception.assert_called_once()
         fake_lock.release.assert_called_once()
 
+    def test_exits_after_consecutive_absences(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: m.logger)
+        monkeypatch.setattr(m, "_stop_requested", lambda: False)
+        monkeypatch.setattr(m, "_sleep_until_poll", lambda: False)
+        monkeypatch.setattr(m, "_clear_own_stop_sentinel", lambda: None)
+        monkeypatch.setattr(m, "_reconcile_presence", lambda a, p, r: (r, p))
+        monkeypatch.setattr(m, "EXIT_CONFIRM_COUNT", 2)
+        # Absent on every poll: must exit after exactly 2 checks.
+        gone = MagicMock(side_effect=[False, False])
+        monkeypatch.setattr(m, "is_claude_running", gone)
+        m._run_daemon()
+        assert gone.call_count == 2
+        fake_lock.release.assert_called_once()
+
+    def test_transient_absence_does_not_exit(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: m.logger)
+        monkeypatch.setattr(m, "_stop_requested", lambda: False)
+        monkeypatch.setattr(m, "_sleep_until_poll", lambda: False)
+        monkeypatch.setattr(m, "_clear_own_stop_sentinel", lambda: None)
+        monkeypatch.setattr(m, "_reconcile_presence", lambda a, p, r: (r, p))
+        monkeypatch.setattr(m, "EXIT_CONFIRM_COUNT", 2)
+        # False, then True (resets), then two consecutive False -> exits on the 4th check.
+        seq = MagicMock(side_effect=[False, True, False, False])
+        monkeypatch.setattr(m, "is_claude_running", seq)
+        m._run_daemon()
+        assert seq.call_count == 4
+        fake_lock.release.assert_called_once()
+
 
 class TestStopRequested:
     def test_no_sentinel(self, tmp_path, monkeypatch):
