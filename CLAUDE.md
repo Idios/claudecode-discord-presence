@@ -4,7 +4,7 @@ This file provides context for Claude Code agents working with this repository.
 
 ## What This Tool Does
 
-claudecode-discord-presence is a lightweight Python tool that displays "Playing 🦀ClaudeCode🦀" on the user's Discord profile while a Claude Code session is active. It monitors `~/.claude/projects/` for recently updated `.jsonl` files and connects to Discord via local RPC. It auto-starts via a Claude Code SessionStart hook and auto-exits when no session is active.
+claudecode-discord-presence is a lightweight Python tool that displays "Playing 🦀ClaudeCode🦀" on the user's Discord profile while a Claude Code session is active. It monitors `~/.claude/projects/` for recently updated `.jsonl` files and connects to Discord via local RPC. It auto-starts via a Claude Code SessionStart hook and auto-exits once Claude Code is no longer running.
 
 ## Supported Platforms
 
@@ -20,7 +20,7 @@ When a user shares this repository URL and asks you to set it up, follow the ste
 - When editing `~/.claude/settings.json`, **merge** the hooks config into existing settings — do not overwrite the file.
 - The Discord desktop app must be running for the tool to work.
 - After setup, **restart Claude Code** for the hook to take effect.
-- The tool starts automatically on session start and exits when idle — no manual process management needed.
+- The tool starts automatically on session start, clears presence when idle, and exits once Claude Code itself is no longer running — no manual process management needed.
 - If the tool exits immediately on macOS/Linux, the Claude Code process name may differ. Ask the user to run `ps aux | grep -i claude` and set the `CCDP_CLAUDE_PROCESS_NAME` environment variable accordingly (do not edit the source).
 
 ## If the User Wants to Uninstall This Tool
@@ -29,7 +29,7 @@ Follow the "Uninstallation" section of README.md:
 1. Remove the hook entry from `~/.claude/settings.json`
 2. `pip uninstall claudecode-discord-presence`
 3. Remove the cloned repository directory
-4. Leftover files (`~/.claude/claudecode-discord-presence.pid`, `.pid.lock`, `.stop`) are removed automatically on normal exit; delete any residue manually if needed
+4. Leftover files (`~/.claude/claudecode-discord-presence.pid`, `.pid.lock`, `.stop`) are removed automatically on normal exit; delete any residue manually if needed. The log file `~/.claude/claudecode-discord-presence.log` (plus up to 2 rotated backups) is never auto-removed — delete it too if desired
 
 ## Project Structure
 
@@ -58,7 +58,7 @@ python -m claudecode_discord_presence.hook  # Simulate hook (launches background
 - **No HTTP daemon** — file polling only, for simplicity.
 - **pypresence** is the sole runtime dependency (Discord RPC).
 - Session activity is detected by `.jsonl` file modification times.
-- Poll interval is 15s; idle timeout is 10 minutes (clears presence only). All tunables are `CCDP_*` env vars.
+- Poll interval is 15s; idle timeout is 10 minutes (clears presence only). The main tunables (poll interval, idle timeout, exit-confirm count, process name) are `CCDP_*` env vars.
 - Exit is a single condition: the Claude Code process absent for `EXIT_CONFIRM_COUNT` (default 3) consecutive polls.
 
 ## Invariants and Known Traps
