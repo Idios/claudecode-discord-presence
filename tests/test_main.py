@@ -123,14 +123,20 @@ class TestIsSessionActive:
         f.write_text('{"msg": "test"}\n')
         assert is_session_active(tmp_path, -1) is False
 
-    def test_exact_boundary_timeout(self, tmp_path: Path):
-        """File modified exactly at timeout boundary."""
+    def test_exact_boundary_timeout(self, tmp_path: Path, monkeypatch):
+        """At the exact boundary (age == timeout_sec), the session is NOT active.
+
+        The clock and the file mtime are both pinned so the result cannot flip
+        on sub-millisecond skew between time.time() and the filesystem (the old
+        Windows flake).
+        """
+        from claudecode_discord_presence import main as m
         f = tmp_path / "session.jsonl"
-        f.write_text('{"msg": "test"}\n')
-        mtime = f.stat().st_mtime
-        # timeout_sec=0 means (time.time() - mtime) < 0 is always False
-        # for a file just written (mtime ~ now), so this should be False
-        assert is_session_active(tmp_path, 0) is False
+        f.write_text("{}")
+        os.utime(f, (1000.0, 1000.0))
+        monkeypatch.setattr(m.time, "time", lambda: 1100.0)  # age == 100s exactly
+        assert m.is_session_active(tmp_path, 100) is False  # age not < timeout
+        assert m.is_session_active(tmp_path, 101) is True   # age < timeout
 
 
 # --- is_claude_running ---
