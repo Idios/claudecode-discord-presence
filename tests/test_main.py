@@ -152,6 +152,12 @@ class TestIsClaudeRunning:
     def test_tasklist_oserror_returns_false(self, mock_run, monkeypatch):
         """An OSError from tasklist yields False, not a raise."""
         monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        # CREATE_NO_WINDOW is a Windows-only subprocess attribute; provide it so
+        # the forced win32 branch is runnable on POSIX CI runners.
+        monkeypatch.setattr(
+            "claudecode_discord_presence.main.subprocess.CREATE_NO_WINDOW", 0,
+            raising=False,
+        )
         mock_run.side_effect = OSError("command not found")
         assert is_claude_running() is False
         mock_run.assert_called_once()
@@ -160,6 +166,12 @@ class TestIsClaudeRunning:
     def test_tasklist_empty_stdout(self, mock_run, monkeypatch):
         """Empty tasklist output returns False."""
         monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        # CREATE_NO_WINDOW is a Windows-only subprocess attribute; provide it so
+        # the forced win32 branch is runnable on POSIX CI runners.
+        monkeypatch.setattr(
+            "claudecode_discord_presence.main.subprocess.CREATE_NO_WINDOW", 0,
+            raising=False,
+        )
         monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
         mock_run.return_value = MagicMock(stdout="", returncode=0)
         assert is_claude_running() is False
@@ -168,6 +180,12 @@ class TestIsClaudeRunning:
     def test_tasklist_info_message_no_match(self, mock_run, monkeypatch):
         """The 'INFO: No tasks' message must not count as a match."""
         monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        # CREATE_NO_WINDOW is a Windows-only subprocess attribute; provide it so
+        # the forced win32 branch is runnable on POSIX CI runners.
+        monkeypatch.setattr(
+            "claudecode_discord_presence.main.subprocess.CREATE_NO_WINDOW", 0,
+            raising=False,
+        )
         monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
         mock_run.return_value = MagicMock(
             stdout="INFO: No tasks are running which match the specified criteria.",
@@ -179,6 +197,12 @@ class TestIsClaudeRunning:
     def test_tasklist_matches_process_row(self, mock_run, monkeypatch):
         """A real tasklist row starting with the image name returns True."""
         monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        # CREATE_NO_WINDOW is a Windows-only subprocess attribute; provide it so
+        # the forced win32 branch is runnable on POSIX CI runners.
+        monkeypatch.setattr(
+            "claudecode_discord_presence.main.subprocess.CREATE_NO_WINDOW", 0,
+            raising=False,
+        )
         monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
         mock_run.return_value = MagicMock(
             stdout="claude.exe                    1234 Console                1     50,000 K",
@@ -190,6 +214,12 @@ class TestIsClaudeRunning:
     def test_tasklist_substring_is_not_a_match(self, mock_run, monkeypatch):
         """A line merely CONTAINING the name (not starting with it) is not a match."""
         monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        # CREATE_NO_WINDOW is a Windows-only subprocess attribute; provide it so
+        # the forced win32 branch is runnable on POSIX CI runners.
+        monkeypatch.setattr(
+            "claudecode_discord_presence.main.subprocess.CREATE_NO_WINDOW", 0,
+            raising=False,
+        )
         monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
         mock_run.return_value = MagicMock(
             stdout="some-wrapper-for-claude.exe    9999 Console                1     10,000 K",
