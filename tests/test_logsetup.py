@@ -8,13 +8,32 @@ from claudecode_discord_presence import logsetup
 
 @pytest.fixture(autouse=True)
 def _reset_logger():
-    """Ensure a clean package logger before and after each test."""
+    """Fully reset the package logger before and after each test.
+
+    configure_logging() sets ``propagate = False``; pytest's logging plugin
+    reacts by attaching its capture handler directly to this named logger
+    (so it can still capture records that no longer propagate to root). That
+    foreign handler would then trip configure_logging()'s ``if
+    logger.handlers`` idempotency guard in a later test, making it skip its
+    setup — a failure that only surfaced under the pytest version CI installs
+    (9.1). Resetting ``propagate`` and ``level`` (not just the handler list),
+    and closing handlers, keeps each test isolated regardless of the plugin.
+    """
     logger = logging.getLogger("claudecode_discord_presence")
-    saved = logger.handlers[:]
-    logger.handlers.clear()
+
+    def _reset() -> None:
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
+        logger.propagate = True
+        logger.setLevel(logging.NOTSET)
+
+    _reset()
     yield
-    logger.handlers.clear()
-    logger.handlers.extend(saved)
+    _reset()
 
 
 def test_configures_two_handlers(tmp_path):
