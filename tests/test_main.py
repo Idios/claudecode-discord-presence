@@ -1,6 +1,7 @@
 """Tests for Claude Code session detection, PID management, and RPC logic."""
 
 import os
+import sys
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,13 +12,8 @@ from claudecode_discord_presence.main import (
     connect_rpc,
     find_latest_jsonl_mtime,
     get_claude_projects_dir,
-    is_already_running,
     is_claude_running,
-    is_process_alive,
     is_session_active,
-    remove_pid_file,
-    write_pid_file,
-    PID_FILE,
 )
 
 
@@ -128,36 +124,20 @@ class TestIsSessionActive:
         f.write_text('{"msg": "test"}\n')
         assert is_session_active(tmp_path, -1) is False
 
-    def test_exact_boundary_timeout(self, tmp_path: Path):
-        """File modified exactly at timeout boundary."""
+    def test_exact_boundary_timeout(self, tmp_path: Path, monkeypatch):
+        """At the exact boundary (age == timeout_sec), the session is NOT active.
+
+        The clock and the file mtime are both pinned so the result cannot flip
+        on sub-millisecond skew between time.time() and the filesystem (the old
+        Windows flake).
+        """
+        from claudecode_discord_presence import main as m
         f = tmp_path / "session.jsonl"
-        f.write_text('{"msg": "test"}\n')
-        mtime = f.stat().st_mtime
-        # timeout_sec=0 means (time.time() - mtime) < 0 is always False
-        # for a file just written (mtime ~ now), so this should be False
-        assert is_session_active(tmp_path, 0) is False
-
-
-# --- is_process_alive ---
-
-
-class TestIsProcessAlive:
-    def test_current_process_is_alive(self):
-        assert is_process_alive(os.getpid()) is True
-
-    def test_nonexistent_pid_is_not_alive(self):
-        assert is_process_alive(99999999) is False
-
-    def test_pid_zero(self):
-        """PID 0 is special (kernel); os.kill(0, 0) sends to process group.
-        Should not crash regardless of result."""
-        result = is_process_alive(0)
-        assert isinstance(result, bool)
-
-    def test_negative_pid(self):
-        """Negative PIDs should not crash."""
-        result = is_process_alive(-1)
-        assert isinstance(result, bool)
+        f.write_text("{}")
+        os.utime(f, (1000.0, 1000.0))
+        monkeypatch.setattr(m.time, "time", lambda: 1100.0)  # age == 100s exactly
+        assert m.is_session_active(tmp_path, 100) is False  # age not < timeout
+        assert m.is_session_active(tmp_path, 101) is True   # age < timeout
 
 
 # --- is_claude_running ---
@@ -169,130 +149,83 @@ class TestIsClaudeRunning:
         assert isinstance(result, bool)
 
     @patch("claudecode_discord_presence.main.subprocess.run")
-    def test_tasklist_oserror_returns_false(self, mock_run):
-        """If subprocess.run raises OSError, return False."""
+    def test_tasklist_oserror_returns_false(self, mock_run, monkeypatch):
+        """An OSError from tasklist yields False, not a raise."""
+        monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        # CREATE_NO_WINDOW is a Windows-only subprocess attribute; provide it so
+        # the forced win32 branch is runnable on POSIX CI runners.
+        monkeypatch.setattr(
+            "claudecode_discord_presence.main.subprocess.CREATE_NO_WINDOW", 0,
+            raising=False,
+        )
         mock_run.side_effect = OSError("command not found")
-        with patch("claudecode_discord_presence.main.sys") as mock_sys:
-            mock_sys.platform = "win32"
-            # Re-import to pick up the patched sys — but since is_claude_running
-            # reads sys.platform at call time, we patch it directly
-            from claudecode_discord_presence.main import is_claude_running as icr
-        # The function catches OSError internally
-        # Just verify it doesn't raise
-        result = is_claude_running()
-        assert isinstance(result, bool)
+        assert is_claude_running() is False
+        mock_run.assert_called_once()
 
     @patch("claudecode_discord_presence.main.subprocess.run")
-    def test_tasklist_empty_stdout(self, mock_run):
-        """Empty tasklist output should return False."""
+    def test_tasklist_empty_stdout(self, mock_run, monkeypatch):
+        """Empty tasklist output returns False."""
+        monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        # CREATE_NO_WINDOW is a Windows-only subprocess attribute; provide it so
+        # the forced win32 branch is runnable on POSIX CI runners.
+        monkeypatch.setattr(
+            "claudecode_discord_presence.main.subprocess.CREATE_NO_WINDOW", 0,
+            raising=False,
+        )
+        monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
         mock_run.return_value = MagicMock(stdout="", returncode=0)
-        with patch("claudecode_discord_presence.main.sys") as mock_sys:
-            mock_sys.platform = "win32"
-            from claudecode_discord_presence import main as main_mod
-            original = main_mod.CLAUDE_PROCESS_NAME
-            main_mod.CLAUDE_PROCESS_NAME = "claude.exe"
-            result = main_mod.is_claude_running()
-            main_mod.CLAUDE_PROCESS_NAME = original
-        assert result is False
+        assert is_claude_running() is False
 
     @patch("claudecode_discord_presence.main.subprocess.run")
-    def test_tasklist_info_message_no_match(self, mock_run):
-        """tasklist 'INFO: No tasks' message should return False."""
+    def test_tasklist_info_message_no_match(self, mock_run, monkeypatch):
+        """The 'INFO: No tasks' message must not count as a match."""
+        monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        # CREATE_NO_WINDOW is a Windows-only subprocess attribute; provide it so
+        # the forced win32 branch is runnable on POSIX CI runners.
+        monkeypatch.setattr(
+            "claudecode_discord_presence.main.subprocess.CREATE_NO_WINDOW", 0,
+            raising=False,
+        )
+        monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
         mock_run.return_value = MagicMock(
             stdout="INFO: No tasks are running which match the specified criteria.",
             returncode=0,
         )
-        with patch("claudecode_discord_presence.main.sys") as mock_sys:
-            mock_sys.platform = "win32"
-            from claudecode_discord_presence import main as main_mod
-            original = main_mod.CLAUDE_PROCESS_NAME
-            main_mod.CLAUDE_PROCESS_NAME = "claude.exe"
-            result = main_mod.is_claude_running()
-            main_mod.CLAUDE_PROCESS_NAME = original
-        assert result is False
+        assert is_claude_running() is False
 
-
-# --- PID file management ---
-
-
-class TestPidFileManagement:
-    def test_write_and_remove_pid_file(self, tmp_path: Path, monkeypatch):
-        pid_file = tmp_path / "test.pid"
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-
-        write_pid_file()
-        assert pid_file.exists()
-        assert pid_file.read_text() == str(os.getpid())
-
-        remove_pid_file()
-        assert not pid_file.exists()
-
-    def test_remove_nonexistent_pid_file(self, tmp_path: Path, monkeypatch):
-        """Removing a PID file that doesn't exist should not raise."""
-        pid_file = tmp_path / "nonexistent.pid"
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        remove_pid_file()  # should not raise
-
-    def test_write_pid_file_creates_parent_dirs(self, tmp_path: Path, monkeypatch):
-        pid_file = tmp_path / "subdir" / "deep" / "test.pid"
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        write_pid_file()
-        assert pid_file.exists()
-
-
-# --- is_already_running ---
-
-
-class TestIsAlreadyRunning:
-    def test_no_pid_file(self, tmp_path: Path, monkeypatch):
-        pid_file = tmp_path / "nonexistent.pid"
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False
-
-    def test_pid_file_with_own_pid(self, tmp_path: Path, monkeypatch):
-        """PID file containing our own PID should return False."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text(str(os.getpid()))
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False
-
-    def test_pid_file_with_dead_pid(self, tmp_path: Path, monkeypatch):
-        """PID file containing a dead PID should return False."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text("99999999")
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False
-
-    def test_pid_file_empty(self, tmp_path: Path, monkeypatch):
-        """Empty PID file should return False (ValueError on int())."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text("")
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False
-
-    def test_pid_file_garbage(self, tmp_path: Path, monkeypatch):
-        """PID file with non-numeric content should return False."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text("not_a_number")
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False
-
-    def test_pid_file_with_whitespace(self, tmp_path: Path, monkeypatch):
-        """PID file with whitespace-padded number should still parse."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text("  99999999  \n")
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
-        assert is_already_running() is False  # dead PID
-
-    def test_pid_file_with_alive_other_pid(self, tmp_path: Path, monkeypatch):
-        """PID file with a living PID (not ours) should return True."""
-        pid_file = tmp_path / "test.pid"
-        pid_file.write_text("12345")
-        monkeypatch.setattr("claudecode_discord_presence.main.PID_FILE", pid_file)
+    @patch("claudecode_discord_presence.main.subprocess.run")
+    def test_tasklist_matches_process_row(self, mock_run, monkeypatch):
+        """A real tasklist row starting with the image name returns True."""
+        monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        # CREATE_NO_WINDOW is a Windows-only subprocess attribute; provide it so
+        # the forced win32 branch is runnable on POSIX CI runners.
         monkeypatch.setattr(
-            "claudecode_discord_presence.main.is_process_alive", lambda pid: True
+            "claudecode_discord_presence.main.subprocess.CREATE_NO_WINDOW", 0,
+            raising=False,
         )
-        assert is_already_running() is True
+        monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
+        mock_run.return_value = MagicMock(
+            stdout="claude.exe                    1234 Console                1     50,000 K",
+            returncode=0,
+        )
+        assert is_claude_running() is True
+
+    @patch("claudecode_discord_presence.main.subprocess.run")
+    def test_tasklist_substring_is_not_a_match(self, mock_run, monkeypatch):
+        """A line merely CONTAINING the name (not starting with it) is not a match."""
+        monkeypatch.setattr("claudecode_discord_presence.main.sys.platform", "win32")
+        # CREATE_NO_WINDOW is a Windows-only subprocess attribute; provide it so
+        # the forced win32 branch is runnable on POSIX CI runners.
+        monkeypatch.setattr(
+            "claudecode_discord_presence.main.subprocess.CREATE_NO_WINDOW", 0,
+            raising=False,
+        )
+        monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "claude.exe")
+        mock_run.return_value = MagicMock(
+            stdout="some-wrapper-for-claude.exe    9999 Console                1     10,000 K",
+            returncode=0,
+        )
+        assert is_claude_running() is False
 
 
 # --- connect_rpc ---
@@ -343,65 +276,291 @@ class TestConnectRpc:
         assert result is None
 
 
-# --- Main loop RPC error handling ---
+# --- _reconcile_presence ---
 
 
-class TestMainLoopRpcErrors:
-    """Test that the main loop handles RPC failures gracefully.
-
-    These tests patch out sleep and sys.exit to run a controlled number
-    of loop iterations.
-    """
-
-    def _run_one_iteration(self, rpc_mock, active: bool, presence_active: bool):
-        """Simulate one iteration of the main loop's RPC logic."""
-        from claudecode_discord_presence.main import connect_rpc, CLIENT_ID
-
-        if active and not presence_active:
-            rpc = rpc_mock
-            if rpc is not None:
-                try:
-                    rpc.update()
-                    return rpc, True
-                except Exception:
-                    return None, False
-            return None, False
-        elif not active and presence_active:
-            if rpc_mock is not None:
-                try:
-                    rpc_mock.clear()
-                except Exception:
-                    pass
-            return rpc_mock, False
-        elif active and presence_active:
-            if rpc_mock is not None:
-                try:
-                    rpc_mock.update()
-                    return rpc_mock, True
-                except Exception:
-                    return None, False
-            return None, False
-        return rpc_mock, presence_active
-
-    def test_update_raises_clears_presence(self):
-        """If rpc.update() raises, presence should be deactivated."""
+class TestReconcilePresence:
+    def test_activates_and_shows_presence(self, monkeypatch):
+        from claudecode_discord_presence import main as m
         mock_rpc = MagicMock()
-        mock_rpc.update.side_effect = BrokenPipeError("pipe broken")
-        rpc, active = self._run_one_iteration(mock_rpc, active=True, presence_active=True)
+        monkeypatch.setattr(m, "connect_rpc", lambda cid: mock_rpc)
+        rpc, active = m._reconcile_presence(True, False, None)
+        assert rpc is mock_rpc
+        assert active is True
+        mock_rpc.update.assert_called_once()
+
+    def test_activation_update_failure_drops_rpc(self):
+        from claudecode_discord_presence import main as m
+        mock_rpc = MagicMock()
+        mock_rpc.update.side_effect = BrokenPipeError()
+        rpc, active = m._reconcile_presence(True, False, mock_rpc)
         assert rpc is None
         assert active is False
 
-    def test_clear_raises_still_deactivates(self):
-        """If rpc.clear() raises, presence should still be deactivated."""
+    def test_idle_clears_presence(self):
+        from claudecode_discord_presence import main as m
         mock_rpc = MagicMock()
-        mock_rpc.clear.side_effect = OSError("IPC error")
-        rpc, active = self._run_one_iteration(mock_rpc, active=False, presence_active=True)
+        rpc, active = m._reconcile_presence(False, True, mock_rpc)
+        assert rpc is mock_rpc
         assert active is False
+        mock_rpc.clear.assert_called_once()
 
-    def test_update_on_new_session_raises(self):
-        """If rpc.update() fails on a new session, rpc should be reset."""
+    def test_idle_clear_failure_drops_rpc(self):
+        from claudecode_discord_presence import main as m
         mock_rpc = MagicMock()
-        mock_rpc.update.side_effect = ConnectionResetError("reset")
-        rpc, active = self._run_one_iteration(mock_rpc, active=True, presence_active=False)
+        mock_rpc.clear.side_effect = OSError()
+        rpc, active = m._reconcile_presence(False, True, mock_rpc)
         assert rpc is None
         assert active is False
+
+    def test_continue_updates(self):
+        from claudecode_discord_presence import main as m
+        mock_rpc = MagicMock()
+        rpc, active = m._reconcile_presence(True, True, mock_rpc)
+        assert rpc is mock_rpc
+        assert active is True
+        mock_rpc.update.assert_called_once()
+
+    def test_continue_update_failure_drops_rpc(self):
+        from claudecode_discord_presence import main as m
+        mock_rpc = MagicMock()
+        mock_rpc.update.side_effect = ConnectionResetError()
+        rpc, active = m._reconcile_presence(True, True, mock_rpc)
+        assert rpc is None
+        assert active is False
+
+
+# --- _drop_rpc ---
+
+
+class TestDropRpc:
+    def test_none_is_safe(self):
+        from claudecode_discord_presence.main import _drop_rpc
+        assert _drop_rpc(None) is None
+
+    def test_clears_and_closes(self):
+        from claudecode_discord_presence.main import _drop_rpc
+        rpc = MagicMock()
+        assert _drop_rpc(rpc) is None
+        rpc.clear.assert_called_once()
+        rpc.close.assert_called_once()
+
+    def test_close_called_even_if_clear_raises(self):
+        from claudecode_discord_presence.main import _drop_rpc
+        rpc = MagicMock()
+        rpc.clear.side_effect = OSError("ipc")
+        assert _drop_rpc(rpc) is None
+        rpc.close.assert_called_once()
+
+    def test_no_raise_if_close_raises(self):
+        from claudecode_discord_presence.main import _drop_rpc
+        rpc = MagicMock()
+        rpc.close.side_effect = OSError("ipc")
+        assert _drop_rpc(rpc) is None  # must not raise
+
+
+# --- _run_daemon lifecycle ---
+
+
+class TestRunDaemonLifecycle:
+    def test_returns_when_lock_unavailable(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = False
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: m.logger)
+        # Must not raise and must not enter the loop.
+        m._run_daemon()
+        fake_lock.acquire.assert_called_once()
+        fake_lock.release.assert_not_called()
+
+    def test_stop_sentinel_exits_and_cleans_up(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: m.logger)
+        monkeypatch.setattr(m, "_stop_requested", lambda: True)  # stop on first check
+        cleared = []
+        monkeypatch.setattr(m, "_clear_own_stop_sentinel", lambda: cleared.append(True))
+        m._run_daemon()
+        fake_lock.release.assert_called_once()
+        assert cleared == [True]
+
+    def test_releases_lock_on_exception(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: m.logger)
+        monkeypatch.setattr(m, "_stop_requested", lambda: False)
+
+        def _boom():
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(m, "is_claude_running", _boom)
+        with pytest.raises(RuntimeError):
+            m._run_daemon()
+        fake_lock.release.assert_called_once()
+
+    def test_logs_traceback_on_unexpected_exception(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: None)
+        monkeypatch.setattr(m, "_stop_requested", lambda: False)
+        monkeypatch.setattr(m, "_clear_own_stop_sentinel", lambda: None)
+        mock_logger = MagicMock()
+        monkeypatch.setattr(m, "logger", mock_logger)
+
+        def _boom():
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(m, "is_claude_running", _boom)
+        with pytest.raises(RuntimeError):
+            m._run_daemon()
+        # The traceback must be logged (stderr is DEVNULL for the detached daemon).
+        mock_logger.exception.assert_called_once()
+        fake_lock.release.assert_called_once()
+
+    def test_exits_after_consecutive_absences(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: m.logger)
+        monkeypatch.setattr(m, "_stop_requested", lambda: False)
+        monkeypatch.setattr(m, "_sleep_until_poll", lambda: False)
+        monkeypatch.setattr(m, "_clear_own_stop_sentinel", lambda: None)
+        monkeypatch.setattr(m, "_reconcile_presence", lambda a, p, r: (r, p))
+        monkeypatch.setattr(m, "EXIT_CONFIRM_COUNT", 2)
+        # Absent on every poll: must exit after exactly 2 checks.
+        gone = MagicMock(side_effect=[False, False])
+        monkeypatch.setattr(m, "is_claude_running", gone)
+        m._run_daemon()
+        assert gone.call_count == 2
+        fake_lock.release.assert_called_once()
+
+    def test_transient_absence_does_not_exit(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        fake_lock = MagicMock()
+        fake_lock.acquire.return_value = True
+        monkeypatch.setattr(m, "InstanceLock", lambda path: fake_lock)
+        monkeypatch.setattr(m, "configure_logging", lambda: m.logger)
+        monkeypatch.setattr(m, "_stop_requested", lambda: False)
+        monkeypatch.setattr(m, "_sleep_until_poll", lambda: False)
+        monkeypatch.setattr(m, "_clear_own_stop_sentinel", lambda: None)
+        monkeypatch.setattr(m, "_reconcile_presence", lambda a, p, r: (r, p))
+        monkeypatch.setattr(m, "EXIT_CONFIRM_COUNT", 2)
+        # False, then True (resets), then two consecutive False -> exits on the 4th check.
+        seq = MagicMock(side_effect=[False, True, False, False])
+        monkeypatch.setattr(m, "is_claude_running", seq)
+        m._run_daemon()
+        assert seq.call_count == 4
+        fake_lock.release.assert_called_once()
+
+
+class TestStopRequested:
+    def test_no_sentinel(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setattr(m, "STOP_FILE", tmp_path / "stop")
+        assert m._stop_requested() is False
+
+    def test_sentinel_own_pid(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text(str(os.getpid()))
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        assert m._stop_requested() is True
+
+    def test_sentinel_other_pid_is_cleaned(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text("999999")
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        assert m._stop_requested() is False
+        assert not f.exists()
+
+    def test_sentinel_garbage(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text("not-a-pid")
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        assert m._stop_requested() is False
+
+
+class TestSleepUntilPoll:
+    def test_true_immediately_when_stop(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text(str(os.getpid()))
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        slept = []
+        monkeypatch.setattr(m.time, "sleep", lambda s: slept.append(s))
+        assert m._sleep_until_poll() is True
+        assert slept == []
+
+    def test_sleeps_full_interval_without_stop(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setattr(m, "STOP_FILE", tmp_path / "absent")
+        slept = []
+        monkeypatch.setattr(m.time, "sleep", lambda s: slept.append(s))
+        assert m._sleep_until_poll() is False
+        expected = len(range(0, m.POLL_INTERVAL_SEC, m.STOP_POLL_SEC))
+        assert len(slept) == expected
+
+
+class TestClearOwnStopSentinel:
+    def test_removes_own(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text(str(os.getpid()))
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        m._clear_own_stop_sentinel()
+        assert not f.exists()
+
+    def test_keeps_other_pid(self, tmp_path, monkeypatch):
+        from claudecode_discord_presence import main as m
+        f = tmp_path / "stop"
+        f.write_text("999999")
+        monkeypatch.setattr(m, "STOP_FILE", f)
+        m._clear_own_stop_sentinel()
+        assert f.exists()
+
+
+class TestEnvInt:
+    def test_unset_returns_default(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.delenv("CCDP_TESTVAL", raising=False)
+        assert m._env_int("CCDP_TESTVAL", 42) == 42
+
+    def test_valid_int(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setenv("CCDP_TESTVAL", "7")
+        assert m._env_int("CCDP_TESTVAL", 42) == 7
+
+    def test_non_integer_returns_default(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setenv("CCDP_TESTVAL", "not-a-number")
+        assert m._env_int("CCDP_TESTVAL", 42) == 42
+
+    def test_non_positive_returns_default(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setenv("CCDP_TESTVAL", "0")
+        assert m._env_int("CCDP_TESTVAL", 42) == 42
+        monkeypatch.setenv("CCDP_TESTVAL", "-3")
+        assert m._env_int("CCDP_TESTVAL", 42) == 42
+
+
+class TestClaudeProcessName:
+    def test_default_by_platform(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.delenv("CCDP_CLAUDE_PROCESS_NAME", raising=False)
+        expected = "claude.exe" if sys.platform == "win32" else "claude"
+        assert m._claude_process_name() == expected
+
+    def test_env_override(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "custom-proc")
+        assert m._claude_process_name() == "custom-proc"
