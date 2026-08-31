@@ -2,9 +2,9 @@
 
 ![CI](https://github.com/Idios/claudecode-discord-presence/actions/workflows/ci.yml/badge.svg)
 
-Show your Claude Code session as Discord Rich Presence status.
+Show your Claude Code (or Codex / Zed) session as Discord Rich Presence status.
 
-When Claude Code is actively running, your Discord profile displays "Playing 🦀ClaudeCode🦀". While a session is idle the presence is cleared, and the background process exits automatically once Claude Code itself is no longer running.
+When any monitored tool (Claude Code, Codex, or Zed) is running, your Discord profile displays "Playing 🦀ClaudeCode🦀". While a session is idle the presence is cleared, and the background process exits automatically once none of the monitored tools is running. Codex and Zed are monitored by default — no client-ID setup required (see "Showing Codex and Zed" below).
 
 ## How It Works
 
@@ -90,8 +90,29 @@ Set environment variables before the tool starts (no source editing required). I
 |----------------------|---------|-------------|
 | `CCDP_POLL_INTERVAL_SEC` | `15` | How often to check for session activity (seconds) |
 | `CCDP_IDLE_TIMEOUT_SEC` | `600` | Idle time (no `.jsonl` updates) before the presence is cleared (seconds) |
-| `CCDP_EXIT_CONFIRM_COUNT` | `3` | Consecutive polls with Claude Code absent before the process exits |
-| `CCDP_CLAUDE_PROCESS_NAME` | `claude.exe` (Windows) | Process name to detect (override if yours differs) |
+| `CCDP_EXIT_CONFIRM_COUNT` | `3` | Consecutive polls with no monitored tool running before the process exits |
+| `CCDP_CLAUDE_PROCESS_NAME` | `claude.exe` (Windows) | Claude Code process name to detect (override if yours differs) |
+| `CCDP_CLAUDE_CLIENT_ID` | built-in ID | Discord client ID for Claude Code |
+| `CCDP_CLAUDE_SESSIONS_DIR` | `~/.claude/projects` | Directory polled for Claude Code activity (empty = process-only) |
+| `CCDP_CODEX_CLIENT_ID` | built-in ID | Discord client ID for Codex (optional override for a distinct presence) |
+| `CCDP_CODEX_PROCESS_NAME` | `codex.exe` / `codex` | Codex process name to detect |
+| `CCDP_CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Directory polled for Codex activity (empty = process-only) |
+| `CCDP_ZED_CLIENT_ID` | built-in ID | Discord client ID for Zed (optional override for a distinct presence) |
+| `CCDP_ZED_PROCESS_NAME` | `Zed.exe` / `zed` | Zed process name to detect |
+| `CCDP_ZED_SESSIONS_DIR` | *(unset)* | Directory polled for Zed activity (empty = process-only) |
+
+## Showing Codex and Zed
+
+Codex and Zed are monitored **by default**, sharing the built-in Discord client ID — so the presence text stays "Playing 🦀ClaudeCode🦀" regardless of which tool is active. This needs no configuration: if any of Claude Code, Codex, or Zed is running, the presence is shown.
+
+If you later want a distinct "Playing …" text per tool, note that Discord ties that text to the **Discord application** you connect as (it is not set in this tool's code). Create a Discord application per tool (Discord Developer Portal → Applications → New Application, named "Codex" / "Zed") and copy its **Application ID** into `CCDP_CODEX_CLIENT_ID` / `CCDP_ZED_CLIENT_ID`:
+
+```powershell
+$env:CCDP_CODEX_CLIENT_ID = "1234567890123456789"
+$env:CCDP_ZED_CLIENT_ID   = "9876543210987654321"
+```
+
+Only one presence is shown at a time. A file-based tool whose session was most recently updated wins; a process-only tool (Zed by default) is the fallback. The daemon exits once **none** of the tools' processes are running. If a tool's process name or session directory differs on your system, override it with the matching `CCDP_*` variable. Set a `*_SESSIONS_DIR` to an empty string to treat that tool as process-only (presence shown for as long as the process runs, with no idle clearing).
 
 You can also inspect and control a running instance:
 

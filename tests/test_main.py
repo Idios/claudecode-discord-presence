@@ -9,11 +9,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from claudecode_discord_presence.main import (
+    Tool,
     connect_rpc,
     find_latest_jsonl_mtime,
     get_claude_projects_dir,
     is_claude_running,
     is_session_active,
+    resolve_active_tool,
+    resolve_tools,
 )
 
 
@@ -279,29 +282,66 @@ class TestConnectRpc:
 # --- _reconcile_presence ---
 
 
+def _tool(key="claude", client_id="123", sessions_dir=None):
+    return Tool(key, key, client_id, f"{key}.exe", sessions_dir)
+
+
 class TestReconcilePresence:
     def test_activates_and_shows_presence(self, monkeypatch):
         from claudecode_discord_presence import main as m
+        tool = _tool()
         mock_rpc = MagicMock()
         monkeypatch.setattr(m, "connect_rpc", lambda cid: mock_rpc)
-        rpc, active = m._reconcile_presence(True, False, None)
+        rpc, cid, active = m._reconcile_presence(tool, False, None, None)
         assert rpc is mock_rpc
+        assert cid == "123"
         assert active is True
         mock_rpc.update.assert_called_once()
 
     def test_activation_update_failure_drops_rpc(self):
         from claudecode_discord_presence import main as m
+        tool = _tool()
         mock_rpc = MagicMock()
         mock_rpc.update.side_effect = BrokenPipeError()
-        rpc, active = m._reconcile_presence(True, False, mock_rpc)
+        rpc, cid, active = m._reconcile_presence(tool, False, mock_rpc, "123")
         assert rpc is None
+        assert cid is None
         assert active is False
+
+    def test_switching_tool_reconnects_with_new_client_id(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        old_rpc = MagicMock()
+        new_rpc = MagicMock()
+        monkeypatch.setattr(m, "connect_rpc", lambda cid: new_rpc)
+        rpc, cid, active = m._reconcile_presence(
+            _tool(client_id="999"), True, old_rpc, "123"
+        )
+        assert rpc is new_rpc
+        assert cid == "999"
+        assert active is True
+        old_rpc.clear.assert_called_once()
+        old_rpc.close.assert_called_once()
+        new_rpc.update.assert_called_once()
+
+    def test_same_tool_does_not_reconnect(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        mock_rpc = MagicMock()
+        monkeypatch.setattr(m, "connect_rpc", MagicMock())
+        rpc, cid, active = m._reconcile_presence(
+            _tool(client_id="123"), True, mock_rpc, "123"
+        )
+        assert rpc is mock_rpc
+        assert cid == "123"
+        assert active is True
+        mock_rpc.update.assert_called_once()
+        m.connect_rpc.assert_not_called()
 
     def test_idle_clears_presence(self):
         from claudecode_discord_presence import main as m
         mock_rpc = MagicMock()
-        rpc, active = m._reconcile_presence(False, True, mock_rpc)
+        rpc, cid, active = m._reconcile_presence(None, True, mock_rpc, "123")
         assert rpc is mock_rpc
+        assert cid == "123"
         assert active is False
         mock_rpc.clear.assert_called_once()
 
@@ -309,24 +349,18 @@ class TestReconcilePresence:
         from claudecode_discord_presence import main as m
         mock_rpc = MagicMock()
         mock_rpc.clear.side_effect = OSError()
-        rpc, active = m._reconcile_presence(False, True, mock_rpc)
+        rpc, cid, active = m._reconcile_presence(None, True, mock_rpc, "123")
         assert rpc is None
+        assert cid is None
         assert active is False
-
-    def test_continue_updates(self):
-        from claudecode_discord_presence import main as m
-        mock_rpc = MagicMock()
-        rpc, active = m._reconcile_presence(True, True, mock_rpc)
-        assert rpc is mock_rpc
-        assert active is True
-        mock_rpc.update.assert_called_once()
 
     def test_continue_update_failure_drops_rpc(self):
         from claudecode_discord_presence import main as m
         mock_rpc = MagicMock()
         mock_rpc.update.side_effect = ConnectionResetError()
-        rpc, active = m._reconcile_presence(True, True, mock_rpc)
+        rpc, cid, active = m._reconcile_presence(_tool(), True, mock_rpc, "123")
         assert rpc is None
+        assert cid is None
         assert active is False
 
 
@@ -395,10 +429,10 @@ class TestRunDaemonLifecycle:
         monkeypatch.setattr(m, "configure_logging", lambda: m.logger)
         monkeypatch.setattr(m, "_stop_requested", lambda: False)
 
-        def _boom():
+        def _boom(_name):
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(m, "is_claude_running", _boom)
+        monkeypatch.setattr(m, "is_process_running", _boom)
         with pytest.raises(RuntimeError):
             m._run_daemon()
         fake_lock.release.assert_called_once()
@@ -414,10 +448,10 @@ class TestRunDaemonLifecycle:
         mock_logger = MagicMock()
         monkeypatch.setattr(m, "logger", mock_logger)
 
-        def _boom():
+        def _boom(_name):
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(m, "is_claude_running", _boom)
+        monkeypatch.setattr(m, "is_process_running", _boom)
         with pytest.raises(RuntimeError):
             m._run_daemon()
         # The traceback must be logged (stderr is DEVNULL for the detached daemon).
@@ -433,11 +467,12 @@ class TestRunDaemonLifecycle:
         monkeypatch.setattr(m, "_stop_requested", lambda: False)
         monkeypatch.setattr(m, "_sleep_until_poll", lambda: False)
         monkeypatch.setattr(m, "_clear_own_stop_sentinel", lambda: None)
-        monkeypatch.setattr(m, "_reconcile_presence", lambda a, p, r: (r, p))
+        monkeypatch.setattr(m, "resolve_tools", lambda: [_tool()])
+        monkeypatch.setattr(m, "_reconcile_presence", lambda a, p, r, c: (r, c, p))
         monkeypatch.setattr(m, "EXIT_CONFIRM_COUNT", 2)
         # Absent on every poll: must exit after exactly 2 checks.
         gone = MagicMock(side_effect=[False, False])
-        monkeypatch.setattr(m, "is_claude_running", gone)
+        monkeypatch.setattr(m, "is_process_running", gone)
         m._run_daemon()
         assert gone.call_count == 2
         fake_lock.release.assert_called_once()
@@ -451,11 +486,12 @@ class TestRunDaemonLifecycle:
         monkeypatch.setattr(m, "_stop_requested", lambda: False)
         monkeypatch.setattr(m, "_sleep_until_poll", lambda: False)
         monkeypatch.setattr(m, "_clear_own_stop_sentinel", lambda: None)
-        monkeypatch.setattr(m, "_reconcile_presence", lambda a, p, r: (r, p))
+        monkeypatch.setattr(m, "resolve_tools", lambda: [_tool()])
+        monkeypatch.setattr(m, "_reconcile_presence", lambda a, p, r, c: (r, c, p))
         monkeypatch.setattr(m, "EXIT_CONFIRM_COUNT", 2)
         # False, then True (resets), then two consecutive False -> exits on the 4th check.
         seq = MagicMock(side_effect=[False, True, False, False])
-        monkeypatch.setattr(m, "is_claude_running", seq)
+        monkeypatch.setattr(m, "is_process_running", seq)
         m._run_daemon()
         assert seq.call_count == 4
         fake_lock.release.assert_called_once()
@@ -564,3 +600,123 @@ class TestClaudeProcessName:
         from claudecode_discord_presence import main as m
         monkeypatch.setenv("CCDP_CLAUDE_PROCESS_NAME", "custom-proc")
         assert m._claude_process_name() == "custom-proc"
+
+
+class TestResolveTools:
+    def _clear(self, monkeypatch):
+        for name in (
+            "CCDP_CLAUDE_CLIENT_ID",
+            "CCDP_CLAUDE_SESSIONS_DIR",
+            "CCDP_CODEX_CLIENT_ID",
+            "CCDP_CODEX_PROCESS_NAME",
+            "CCDP_CODEX_SESSIONS_DIR",
+            "CCDP_ZED_CLIENT_ID",
+            "CCDP_ZED_PROCESS_NAME",
+            "CCDP_ZED_SESSIONS_DIR",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_default_is_all_three_tools(self, monkeypatch):
+        self._clear(monkeypatch)
+        tools = resolve_tools()
+        assert [t.key for t in tools] == ["claude", "codex", "zed"]
+        # All share the built-in client ID by default.
+        assert tools[0].client_id == tools[1].client_id == tools[2].client_id
+        assert tools[0].client_id
+        assert tools[0].sessions_dir == get_claude_projects_dir()
+        assert tools[1].sessions_dir == Path.home() / ".codex" / "sessions"
+        assert tools[2].sessions_dir is None  # Zed is process-only by default
+
+    def test_codex_label_and_client_id(self, monkeypatch):
+        self._clear(monkeypatch)
+        tools = resolve_tools()
+        codex = tools[1]
+        assert codex.label == "Codex"
+
+    def test_codex_client_id_override(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("CCDP_CODEX_CLIENT_ID", "999")
+        assert resolve_tools()[1].client_id == "999"
+
+    def test_zed_client_id_override(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("CCDP_ZED_CLIENT_ID", "888")
+        assert resolve_tools()[2].client_id == "888"
+
+    def test_codex_process_name_override(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("CCDP_CODEX_PROCESS_NAME", "codex-cli.exe")
+        assert resolve_tools()[1].process_name == "codex-cli.exe"
+
+    def test_codex_sessions_dir_override(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("CCDP_CODEX_SESSIONS_DIR", "/tmp/codex-sessions")
+        assert resolve_tools()[1].sessions_dir == Path("/tmp/codex-sessions")
+
+    def test_empty_sessions_dir_means_process_only(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("CCDP_CODEX_SESSIONS_DIR", "")
+        assert resolve_tools()[1].sessions_dir is None
+
+    def test_claude_client_id_override(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("CCDP_CLAUDE_CLIENT_ID", "777")
+        assert resolve_tools()[0].client_id == "777"
+
+
+class TestResolveActiveTool:
+    def test_empty_running_returns_none(self):
+        assert resolve_active_tool([], 600) is None
+
+    def test_process_only_tool_is_active(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setattr(m.time, "time", lambda: 100.0)
+        zed = Tool("zed", "Zed", "888", "Zed.exe", None)
+        assert resolve_active_tool([zed], 600) is zed
+
+    def test_recent_session_tool_is_active(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setattr(m.time, "time", lambda: 100.0)
+        claude = Tool("claude", "Claude", "123", "claude.exe", Path("/x"))
+        monkeypatch.setattr(m, "find_latest_jsonl_mtime", lambda d: 95.0)
+        assert resolve_active_tool([claude], 600) is claude
+
+    def test_stale_session_tool_is_not_active(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setattr(m.time, "time", lambda: 1000.0)
+        claude = Tool("claude", "Claude", "123", "claude.exe", Path("/x"))
+        monkeypatch.setattr(m, "find_latest_jsonl_mtime", lambda d: 100.0)
+        assert resolve_active_tool([claude], 600) is None
+
+    def test_most_recent_wins(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setattr(m.time, "time", lambda: 100.0)
+        claude = Tool("claude", "Claude", "123", "claude.exe", Path("/c"))
+        codex = Tool("codex", "Codex", "999", "codex.exe", Path("/x"))
+        monkeypatch.setattr(
+            m, "find_latest_jsonl_mtime", lambda d: 90.0 if d == Path("/c") else 95.0
+        )
+        assert resolve_active_tool([claude, codex], 600) is codex
+
+    def test_missing_session_files_skips_tool(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setattr(m.time, "time", lambda: 100.0)
+        claude = Tool("claude", "Claude", "123", "claude.exe", Path("/c"))
+        monkeypatch.setattr(m, "find_latest_jsonl_mtime", lambda d: None)
+        assert resolve_active_tool([claude], 600) is None
+
+    def test_recent_file_based_beats_process_only(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setattr(m.time, "time", lambda: 100.0)
+        claude = Tool("claude", "Claude", "123", "claude.exe", Path("/c"))
+        zed = Tool("zed", "Zed", "888", "Zed.exe", None)
+        monkeypatch.setattr(m, "find_latest_jsonl_mtime", lambda d: 95.0)
+        assert resolve_active_tool([zed, claude], 600) is claude
+
+    def test_stale_file_based_falls_back_to_process_only(self, monkeypatch):
+        from claudecode_discord_presence import main as m
+        monkeypatch.setattr(m.time, "time", lambda: 1000.0)
+        claude = Tool("claude", "Claude", "123", "claude.exe", Path("/c"))
+        zed = Tool("zed", "Zed", "888", "Zed.exe", None)
+        monkeypatch.setattr(m, "find_latest_jsonl_mtime", lambda d: 100.0)
+        assert resolve_active_tool([claude, zed], 600) is zed
